@@ -1,0 +1,21 @@
+{
+  "name": "xin-binlang-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "db:init": "node --env-file-if-exists=.env src/seed-cli.js",
+    "pw:rotate": "node --env-file-if-exists=.env src/rotate-passwords.js",
+    "demo:purge": "node --env-file-if-exists=.env src/purge-demo-data.js",
+    "seed": "npm run db:init",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.23.3"
+  }
+}

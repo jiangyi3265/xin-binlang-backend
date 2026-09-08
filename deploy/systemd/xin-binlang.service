@@ -1,0 +1,28 @@
+[Unit]
+Description=Xin Binlang Custom Promotion Platform
+After=network-online.target mysqld.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xin-binlang
+Group=xin-binlang
+WorkingDirectory=/opt/xin-binlang/current/backend
+EnvironmentFile=/opt/xin-binlang/shared/.env
+Environment=NODE_ENV=production
+ExecStart=/opt/xin-binlang/node/bin/node /opt/xin-binlang/current/backend/src/server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/xin-binlang/shared/uploads
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

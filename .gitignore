@@ -1,0 +1,56 @@
+# Dependencies and generated output
+node_modules/
+dist/
+build/
+coverage/
+.nyc_output/
+.cache/
+.tmp/
+tmp/
+temp/
+*.log
+*.tmp
+*.bak
+*.tsbuildinfo
+
+# Local environment and authentication
+.env
+.env.*
+!.env.example
+.npmrc
+.pnpmrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+credentials.json
+service-account*.json
+secrets/
+*.secrets.*
+
+# Runtime and business data
+uploads/
+data/
+backups/
+*.sql
+*.sql.gz
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.tar.gz
+*.zip
+
+# IDE / OS / temporary reviews
+.idea/
+.vscode/
+.hbuilderx/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.codex-doc-review/

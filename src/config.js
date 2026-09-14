@@ -45,6 +45,19 @@ export function loadConfig(overrides = {}) {
     adminDir: overrides.adminDir || resolve(backendRoot, process.env.ADMIN_DIR || '../总部管理后台'),
     h5Dir: overrides.h5Dir || resolve(backendRoot, process.env.H5_DIR || '../槟榔小程序端/dist/build/h5'),
     uploadDir: overrides.uploadDir || process.env.UPLOAD_DIR || resolve(backendRoot, 'uploads'),
+    transfer: {
+      enabled: process.env.WECHAT_TRANSFER_ENABLED === 'true',
+      appId: process.env.WECHAT_APP_ID || '',
+      mchId: process.env.WECHAT_PAY_MCH_ID || '',
+      serialNo: process.env.WECHAT_PAY_SERIAL_NO || '',
+      privateKeyPath: process.env.WECHAT_PAY_PRIVATE_KEY_PATH || '',
+      publicKeyId: process.env.WECHAT_PAY_PUBLIC_KEY_ID || '',
+      publicKeyPath: process.env.WECHAT_PAY_PUBLIC_KEY_PATH || '',
+      sceneId: process.env.WECHAT_TRANSFER_SCENE_ID || '',
+      activityName: process.env.WECHAT_TRANSFER_ACTIVITY_NAME || '',
+      rewardDescription: process.env.WECHAT_TRANSFER_REWARD_DESCRIPTION || '',
+      maxCents: Number(process.env.WECHAT_TRANSFER_MAX_CENTS || 20000)
+    },
     wechat: {
       appId: process.env.WECHAT_APP_ID || '',
       appSecret: process.env.WECHAT_APP_SECRET || '',

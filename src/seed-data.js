@@ -4,14 +4,14 @@ import { execute, transaction } from './database.js'
 const DAY = 86_400_000
 
 export const DEFAULT_REDEMPTION_FLOW = [
-  { no: '01', title: '购买活动产品', description: '购买带有“开码有奖”标识的金榔记产品' },
+  { no: '01', title: '购买活动产品', description: '购买带有“开码有奖”标识的倌榔产品' },
   { no: '02', title: '获取数字兑换码', description: '打开包装，找到包装内的 6 位数字兑换码' },
-  { no: '03', title: '微信登录兑奖', description: '微信授权登录后输入兑换码，立即查看中奖结果' },
-  { no: '04', title: '到店出示凭证', description: '中奖后在有效期内选择门店，出示二维码完成核销' }
+  { no: '03', title: '登录后自主选牌', description: '微信登录后输入兑换码，选择一张牌翻开本次结果' },
+  { no: '04', title: '按奖励领取', description: '换购奖到店补款核销；现金红包在微信小程序内领取' }
 ]
 
-export const DEFAULT_PRODUCT_IMAGE = '/assets/product-30.png'
-export const DEFAULT_BRAND_BACKGROUND = '/assets/brand-grove-v2.jpg'
+export const DEFAULT_PRODUCT_IMAGE = '/assets/guanlang-product-50.jpg'
+export const DEFAULT_BRAND_BACKGROUND = '/assets/guanlang-botanical-blue.png'
 
 async function runMany(db, sql, rows) {
   for (const row of rows) await execute(db, sql, ...row)
@@ -42,12 +42,12 @@ export async function seedDatabase(db) {
       activity_start, activity_end, daily_limit, prize_valid_days, home_bg,
       poster, product_image, rule_bg, notice_json, flow_json, service_json, updated_at
     ) VALUES (1, ?, ?, ?, ?, ?, 1, ?, ?, 0, 30, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        '金榔记', 'JINLANGJI', '开码有奖', '一码一兑 · 开袋见喜', '撕开包装，码上开奖',
+        '倌榔', 'GUANLANG', '开码有奖', '一码一兑 · 开袋见喜', '撕开包装，码上开奖',
         new Date(activeStart).toISOString().slice(0, 10), new Date(activeEnd).toISOString().slice(0, 10),
         DEFAULT_BRAND_BACKGROUND, '/assets/hero-fruit.jpg', DEFAULT_PRODUCT_IMAGE, DEFAULT_BRAND_BACKGROUND,
         JSON.stringify({ enabled: true, badge: '公告', buttonText: '我知道了', image: '', title: '第三期活动已上线', date: new Date(now).toISOString().slice(0, 10), lines: ['新增臻享奖池，20 元档兑换码专享大奖。', '中奖后请于 30 天内到门店核销。', '当前活动不限制每日兑奖次数。'] }),
         JSON.stringify(DEFAULT_REDEMPTION_FLOW),
-        JSON.stringify({ phone: '400-628-1868', wechat: 'jinlangji-service', hours: '09:00 - 21:00' }),
+        JSON.stringify({ phone: '400-628-1868', wechat: '', hours: '09:00 - 21:00' }),
         now)
 
     const customers = [
@@ -70,12 +70,12 @@ export async function seedDatabase(db) {
     ])
 
     const stores = [
-      ['S01', '金榔记雨花亭旗舰店', '雨花亭旗舰店', '长沙市雨花区韶山中路 168 号 1 楼', 28.1682, 113.0007, '0731-8888-0101', '08:00 - 23:00', '/assets/store-1.jpg'],
-      ['S02', '金榔记五一广场店', '五一广场店', '长沙市芙蓉区黄兴中路 88 号 B1-12', 28.1942, 112.9760, '0731-8888-0102', '09:00 - 24:00', '/assets/store-2.jpg'],
-      ['S03', '金榔记岳麓大学城店', '岳麓大学城店', '长沙市岳麓区麓山南路 932 号', 28.1685, 112.9444, '0731-8888-0103', '08:30 - 22:30', '/assets/store-3.jpg'],
-      ['S04', '金榔记星沙万家丽店', '星沙万家丽店', '长沙县万家丽北路 58 号', 28.2510, 113.0801, '0731-8888-0104', '08:30 - 23:00', '/assets/store-4.jpg'],
-      ['S05', '金榔记开福万达店', '开福万达店', '长沙市开福区中山路 589 号', 28.2051, 112.9796, '0731-8888-0105', '09:00 - 22:30', '/assets/store-2.jpg'],
-      ['S06', '金榔记天心阁店', '天心阁店', '长沙市天心区城南西路 33 号', 28.1830, 112.9824, '0731-8888-0106', '08:30 - 22:30', '/assets/store-3.jpg']
+      ['S01', '倌榔雨花亭旗舰店', '雨花亭旗舰店', '长沙市雨花区韶山中路 168 号 1 楼', 28.1682, 113.0007, '0731-8888-0101', '08:00 - 23:00', '/assets/store-1.jpg'],
+      ['S02', '倌榔五一广场店', '五一广场店', '长沙市芙蓉区黄兴中路 88 号 B1-12', 28.1942, 112.9760, '0731-8888-0102', '09:00 - 24:00', '/assets/store-2.jpg'],
+      ['S03', '倌榔岳麓大学城店', '岳麓大学城店', '长沙市岳麓区麓山南路 932 号', 28.1685, 112.9444, '0731-8888-0103', '08:30 - 22:30', '/assets/store-3.jpg'],
+      ['S04', '倌榔星沙万家丽店', '星沙万家丽店', '长沙县万家丽北路 58 号', 28.2510, 113.0801, '0731-8888-0104', '08:30 - 23:00', '/assets/store-4.jpg'],
+      ['S05', '倌榔开福万达店', '开福万达店', '长沙市开福区中山路 589 号', 28.2051, 112.9796, '0731-8888-0105', '09:00 - 22:30', '/assets/store-2.jpg'],
+      ['S06', '倌榔天心阁店', '天心阁店', '长沙市天心区城南西路 33 号', 28.1830, 112.9824, '0731-8888-0106', '08:30 - 22:30', '/assets/store-3.jpg']
     ].map((row, index) => [...row, 'active', index < 2 ? 'A004' : null, now, now])
     await runMany(db, `INSERT INTO stores (
       id,name,short_name,address,latitude,longitude,phone,business_hours,image,status,created_by_admin_id,created_at,updated_at

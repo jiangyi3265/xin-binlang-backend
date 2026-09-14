@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS settings (
   id TINYINT UNSIGNED PRIMARY KEY,
   brand VARCHAR(120) NOT NULL,
   brand_en VARCHAR(120) NOT NULL,
-  brand_mark VARCHAR(8) NOT NULL DEFAULT '榔',
+  brand_mark VARCHAR(8) NOT NULL DEFAULT '倌',
   brand_logo VARCHAR(500) NOT NULL DEFAULT '',
   admin_subtitle VARCHAR(80) NOT NULL DEFAULT '总部运营中枢',
   activity_name VARCHAR(160) NOT NULL,
@@ -196,6 +196,33 @@ CREATE TABLE IF NOT EXISTS redemptions (
   CONSTRAINT chk_redemptions_won CHECK (won IN (0,1))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS prize_reward_rules (
+  prize_id VARCHAR(50) PRIMARY KEY,
+  exchange_cents INT UNSIGNED NOT NULL DEFAULT 0,
+  CONSTRAINT fk_reward_prize FOREIGN KEY (prize_id) REFERENCES prizes(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS cash_rewards (
+  redemption_id VARCHAR(50) PRIMARY KEY,
+  customer_id VARCHAR(50) NOT NULL,
+  out_bill_no VARCHAR(32) NOT NULL UNIQUE,
+  mch_id VARCHAR(32) NOT NULL,
+  app_id VARCHAR(32) NOT NULL,
+  openid VARCHAR(64) NOT NULL,
+  amount_cents INT UNSIGNED NOT NULL,
+  request_json JSON NULL,
+  state VARCHAR(32) NOT NULL DEFAULT 'SUBMITTING',
+  transfer_bill_no VARCHAR(64) NOT NULL DEFAULT '',
+  package_info VARCHAR(2048) NOT NULL DEFAULT '',
+  last_error VARCHAR(80) NOT NULL DEFAULT '',
+  lease_until BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  created_at BIGINT UNSIGNED NOT NULL,
+  updated_at BIGINT UNSIGNED NOT NULL,
+  INDEX idx_cash_reconcile (state, updated_at),
+  CONSTRAINT fk_cash_redemption FOREIGN KEY (redemption_id) REFERENCES redemptions(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_cash_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS coupons (
   id VARCHAR(50) PRIMARY KEY,
   customer_id VARCHAR(50) NOT NULL,
@@ -315,6 +342,8 @@ async function openMysql(config, seed) {
   const db = { driver: 'mysql', pool, async close() { await pool.end() } }
   await migrateUnlimitedDailyRedemption(db)
   await migrateBrandSettings(db)
+  const cashRequestColumn = await queryOne(db, "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='cash_rewards' AND COLUMN_NAME='request_json'")
+  if (!cashRequestColumn) await execute(db, 'ALTER TABLE cash_rewards ADD COLUMN request_json JSON NULL AFTER amount_cents')
   await migrateSalesManagement(db)
   await migrateReusablePoolNames(db)
   const version = await queryOne(db, "SELECT value FROM schema_meta WHERE `key`='seed_version'")
@@ -343,7 +372,7 @@ async function migrateBrandSettings(db) {
   const rows = await queryAll(db, `SELECT COLUMN_NAME AS column_name FROM information_schema.COLUMNS
     WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='settings' AND COLUMN_NAME IN ('brand_mark','brand_logo','admin_subtitle')`)
   const columns = new Set(rows.map(row => row.column_name))
-  if (!columns.has('brand_mark')) await execute(db, "ALTER TABLE settings ADD COLUMN brand_mark VARCHAR(8) NOT NULL DEFAULT '榔' AFTER brand_en")
+  if (!columns.has('brand_mark')) await execute(db, "ALTER TABLE settings ADD COLUMN brand_mark VARCHAR(8) NOT NULL DEFAULT '倌' AFTER brand_en")
   if (!columns.has('brand_logo')) await execute(db, "ALTER TABLE settings ADD COLUMN brand_logo VARCHAR(500) NOT NULL DEFAULT '' AFTER brand_mark")
   if (!columns.has('admin_subtitle')) await execute(db, "ALTER TABLE settings ADD COLUMN admin_subtitle VARCHAR(80) NOT NULL DEFAULT '总部运营中枢' AFTER brand_logo")
 }
@@ -405,7 +434,7 @@ async function ensureSettingsRow(db) {
     activity_start, activity_end, daily_limit, prize_valid_days, home_bg,
     poster, product_image, rule_bg, notice_json, flow_json, service_json, updated_at
   ) VALUES (1, ?, ?, ?, ?, ?, 0, ?, ?, 0, 30, ?, '', ?, ?, ?, ?, ?, ?)`,
-    '金榔记', 'JINLANGJI', '开码有奖', '一码一兑 · 全程可追溯', '撕开包装，扫码开奖',
+    '倌榔', 'GUANLANG', '开码有奖', '一码一兑 · 全程可追溯', '撕开包装，扫码开奖',
     today, end,
     DEFAULT_BRAND_BACKGROUND,
     DEFAULT_PRODUCT_IMAGE,

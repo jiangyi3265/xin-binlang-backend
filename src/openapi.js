@@ -7,7 +7,7 @@ export function buildOpenApi(origin) {
   const operation = (summary, tags, secured = true, extra = {}) => ({ summary, tags:[tags], ...(secured?{security:auth}:{}), responses:{ 200:ok(), 400:{description:'业务校验失败'}, 401:{description:'未登录或令牌失效'}, 403:{description:'无权限'} }, ...extra })
   return {
     openapi:'3.1.0',
-    info:{ title:'津郎记兑奖平台 API', version:'1.0.0', description:'消费者小程序、门店端与总部管理后台统一业务接口。所有写操作均受服务端校验与审计。' },
+    info:{ title:'倌榔兑奖平台 API', version:'1.0.0', description:'消费者小程序、门店端与总部管理后台统一业务接口。所有写操作均受服务端校验与审计。' },
     servers:[{url:origin}],
     tags:[
       {name:'Public',description:'公开配置与健康检查'},
@@ -20,7 +20,7 @@ export function buildOpenApi(origin) {
       schemas:{
         Login:{type:'object',required:['username','password'],properties:{username:{type:'string'},password:{type:'string',format:'password'}}},
         Redeem:{type:'object',required:['code'],properties:{code:{type:'string',minLength:6,maxLength:6},preferredStoreId:{type:'string'}}},
-        Verify:{type:'object',properties:{position:{type:'string'}}}
+        Verify:{type:'object',properties:{position:{type:'string'},exchangePaid:{type:'boolean',description:'换购核销时必须确认已收补款并交付商品'}}}
       }
     },
     paths:{
@@ -31,6 +31,10 @@ export function buildOpenApi(origin) {
       '/api/public/prizes':{get:operation('公开奖品陈列（不含库存与权重）','Public',false)},
       '/api/customer/auth/wechat':{post:operation('微信 code 登录','Customer',false)},
       '/api/customer/bootstrap':{get:operation('消费者端初始化数据','Customer')},
+      '/api/customer/draw':{post:operation('选择一张牌并开奖；同一用户重试返回原结果','Customer',true,{requestBody:{required:true,content:{'application/json':{schema:{type:'object',required:['code','selectedCard'],properties:{code:{type:'string',minLength:6,maxLength:6},selectedCard:{type:'integer',minimum:1,maximum:6}}}}}}})},
+      '/api/customer/records/{id}/cash/claim':{post:operation('领取现金红包（同单重试）','Customer')},
+      '/api/customer/records/{id}/cash':{get:operation('查询红包实际到账状态','Customer')},
+      '/api/admin/cash-rewards':{get:operation('最近红包领取记录','Admin')},
       '/api/customer/redeem':{post:operation('兑换并抽奖','Customer',true,{requestBody:{required:true,content:{'application/json':{schema:{$ref:'#/components/schemas/Redeem'}}}}})},
       '/api/customer/records':{get:operation('消费者兑奖记录','Customer')},
       '/api/customer/coupons':{get:operation('消费者优惠券','Customer')},

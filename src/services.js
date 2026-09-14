@@ -1,3 +1,4 @@
+import { CashRewards } from './cash-rewards.js';
 import { randomInt } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
@@ -40,6 +41,7 @@ export class PlatformService {
     this.db = db;
     this.config = config;
     this.wechatToken = null;
+    this.cash = new CashRewards(this);
   }
   async settingsRow() {
     const row = await queryOne(this.db, 'SELECT * FROM settings WHERE id = 1');
@@ -58,7 +60,7 @@ export class PlatformService {
   // 未登录也要能看到本期奖品，所以走 prizeView 的公开视图：
   // 只给名称/档位/价值/图片，库存、权重、中奖概率一律不出小程序。
   async publicPrizes() {
-    const rows = await queryAll(this.db, "SELECT p.*, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id WHERE p.status='active' ORDER BY p.value_cents DESC");
+    const rows = await queryAll(this.db, "SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.status='active' ORDER BY p.value_cents DESC");
     return rows.map(row => prizeView(row, true));
   }
   async audit({
@@ -92,7 +94,7 @@ export class PlatformService {
   async expireOrders() {
     const now = Date.now();
     return await transaction(this.db, async () => {
-      const rows = await queryAll(this.db, "SELECT id, customer_id, code, prize_snapshot_json FROM redemptions WHERE status = 'pending' AND expires_at <= ?", now);
+      const rows = await queryAll(this.db, "SELECT id, customer_id, code, prize_snapshot_json FROM redemptions WHERE status = 'pending' AND expires_at <= ? AND NOT EXISTS (SELECT 1 FROM cash_rewards cr WHERE cr.redemption_id=redemptions.id) FOR UPDATE", now);
       const update = (...params) => execute(this.db, "UPDATE redemptions SET status = 'expired', updated_at = ? WHERE id = ? AND status = 'pending'", ...params);
       const updateCode = (...params) => execute(this.db, "UPDATE redeem_codes SET status = 'expired' WHERE redemption_id = ?", ...params);
       for (const row of rows) {
@@ -170,7 +172,7 @@ export class PlatformService {
             page: payload.linkCode ? `pages/record/detail?code=${encodeURIComponent(payload.linkCode)}` : 'pages/index/index',
             data: {
               thing1: {
-                value: String(payload.title || '金榔记服务通知').slice(0, 20)
+                value: String(payload.title || '倌榔服务通知').slice(0, 20)
               },
               thing2: {
                 value: String(payload.description || '请进入小程序查看详情').slice(0, 20)
@@ -249,7 +251,7 @@ export class PlatformService {
     assert(customer, 401, 'ERR_AUTH', '用户不存在或登录已失效');
     const stores = (await queryAll(this.db, "SELECT * FROM stores WHERE status = 'active' ORDER BY id")).map(storeView);
     const pools = (await queryAll(this.db, "SELECT * FROM prize_pools WHERE status = 'active' ORDER BY id")).map(poolView);
-    const prizes = (await queryAll(this.db, `SELECT p.*, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id WHERE p.status='active' ORDER BY p.value_cents DESC`)).map(row => prizeView(row, true));
+    const prizes = (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.status='active' ORDER BY p.value_cents DESC`)).map(row => prizeView(row, true));
     const counts = await queryOne(this.db, `SELECT
       COUNT(*) AS total,
       SUM(CASE WHEN won=1 THEN 1 ELSE 0 END) AS won,
@@ -298,6 +300,7 @@ export class PlatformService {
   async updatePreferredStore(customerId, id, storeId) {
     const row = await queryOne(this.db, 'SELECT * FROM redemptions WHERE customer_id=? AND id=?', customerId, id);
     assert(row, 404, 'ERR_RECORD_NOT_FOUND', '兑奖记录不存在');
+    assert(parseJson(row.prize_snapshot_json, {}).category !== 'cash', 409, 'ERR_CASH_STORE', '现金红包通过微信领取，无需选择门店');
     assert(row.won === 1 && row.status === 'pending', 409, 'ERR_RECORD_STATE', '仅待核销订单可以更换意向门店');
     const store = await queryOne(this.db, "SELECT * FROM stores WHERE id=? AND status='active'", requiredText(storeId, '门店', 50));
     assert(store, 404, 'ERR_STORE_NOT_FOUND', '门店不存在或已停用');
@@ -314,11 +317,18 @@ export class PlatformService {
     });
     return redemptionView(await queryOne(this.db, redemptionJoin + ' WHERE r.id=?', id));
   }
-  async redeem(customerId, inputCode, preferredStoreId, ip = '') {
+  async redeem(customerId, inputCode, preferredStoreId, ip = '', selectedCard = null) {
     const code = String(inputCode || '').trim().toUpperCase();
     assert(/^[A-Z0-9]{6}$/.test(code), 400, 'ERR_FORMAT', '兑换码为 6 位字母或数字，请检查后重试');
+    if (selectedCard !== null) integer(selectedCard, '所选卡牌', 1, 6);
     const now = Date.now();
     return await transaction(this.db, async () => {
+      // Serialize each customer's daily quota and recover an existing result on retry.
+      await queryOne(this.db, 'SELECT id FROM customers WHERE id=? FOR UPDATE', customerId);
+      const previous = await queryOne(this.db, redemptionJoin + ' WHERE r.code=?', code);
+      if (selectedCard !== null && previous?.customer_id === customerId) {
+        return { ok: true, code: previous.won ? 'OK_WIN' : 'OK_LOSE', msg: previous.won ? '恭喜中奖' : '谢谢惠顾', record: redemptionView(previous) };
+      }
       const setting = await this.settingsRow();
       assert(setting.active === 1, 409, 'ERR_CLOSED', '活动已暂停，请关注后续公告');
       const today = nowIsoDate();
@@ -335,9 +345,13 @@ export class PlatformService {
       assert(codeRow.status === 'unused', 409, 'ERR_USED', '该兑换码已被使用，同一卡密仅可兑奖一次');
       assert(codeRow.batch_status === 'active', 409, codeRow.batch_status === 'expired' ? 'ERR_BATCH_EXPIRED' : 'ERR_BATCH_PAUSED', codeRow.batch_status === 'expired' ? '该卡密所属批次已到期' : '该卡密所属批次已暂停');
       assert(codeRow.starts_at <= now && codeRow.expires_at > now, 409, 'ERR_BATCH_EXPIRED', '该卡密所属批次不在有效期内');
+      const cashPrize = await queryOne(this.db, "SELECT MAX(value_cents) AS amount FROM prizes WHERE pool_id=? AND category='cash' AND status='active' AND stock>0", codeRow.pool_id);
+      if (cashPrize?.amount != null) {
+        assert(this.cash.ready(), 409, 'ERR_CASH_NOT_CONFIGURED', '本奖池现金领取尚未开放，请稍后再来，兑换码未消耗');
+        assert(Number(cashPrize.amount) <= this.config.transfer.maxCents, 409, 'ERR_CASH_AMOUNT', '现金奖品配置需要调整，兑换码未消耗');
+      }
       let store = preferredStoreId ? await queryOne(this.db, "SELECT * FROM stores WHERE id=? AND status='active'", preferredStoreId) : null;
       if (!store) store = await queryOne(this.db, "SELECT * FROM stores WHERE status='active' ORDER BY id LIMIT 1");
-      assert(store, 409, 'ERR_NO_STORE', '暂无可核销门店');
       let prize = null;
       let stockOut = false;
       const shouldWin = codeRow.forced_outcome === 'win' || codeRow.forced_outcome !== 'lose' && randomInt(0, 1_000_000) < codeRow.win_rate_ppm;
@@ -352,6 +366,12 @@ export class PlatformService {
           prize = chooseWeightedPrize(await queryAll(this.db, "SELECT * FROM prizes WHERE pool_id=? AND status='active' AND stock>0 ORDER BY value_cents DESC", codeRow.pool_id));
         }
       }
+      if (prize?.category === 'cash') {
+        assert(this.cash.ready(), 409, 'ERR_CASH_NOT_CONFIGURED', '现金奖品尚未开放领取，请稍后再来，兑换码未消耗');
+        assert(prize.value_cents > 0 && prize.value_cents <= this.config.transfer.maxCents, 409, 'ERR_CASH_AMOUNT', '现金奖品配置需要调整，兑换码未消耗');
+      } else if (prize) {
+        assert(store, 409, 'ERR_NO_STORE', '暂无可核销门店，兑换码未消耗');
+      }
       if (prize) {
         const changed = await execute(this.db, "UPDATE prizes SET stock=stock-1, updated_at=? WHERE id=? AND status='active' AND stock>0", now, prize.id);
         if (Number(changed.changes) !== 1) {
@@ -360,7 +380,7 @@ export class PlatformService {
         }
       }
       const id = randomId('R');
-      const orderNumber = `JL${new Date(now).toISOString().slice(0, 10).replaceAll('-', '')}${randomInt(10000, 99999)}`;
+      const orderNumber = `GL${new Date(now).toISOString().slice(0, 10).replaceAll('-', '')}${randomInt(10000, 99999)}`;
       const won = Boolean(prize);
       const snapshot = won ? {
         id: prize.id,
@@ -369,14 +389,16 @@ export class PlatformService {
         level: prize.level,
         category: prize.category,
         valueCents: prize.value_cents,
-        image: prize.image
-      } : {};
+        image: prize.image,
+        exchangeCents: Number((await queryOne(this.db, 'SELECT exchange_cents FROM prize_reward_rules WHERE prize_id=?', prize.id))?.exchange_cents || 0),
+        selectedCard
+      } : { selectedCard };
       const expiresAt = won ? now + setting.prize_valid_days * DAY : null;
-      await execute(this.db, `INSERT INTO redemptions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', '', ?, ?, NULL, ?)`, id, orderNumber, code, codeRow.batch_id, codeRow.pool_id, customerId, won ? prize.id : null, won ? 1 : 0, won ? 'pending' : 'lose', JSON.stringify(snapshot), store.id, now, expiresAt, now);
+      await execute(this.db, `INSERT INTO redemptions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', '', ?, ?, NULL, ?)`, id, orderNumber, code, codeRow.batch_id, codeRow.pool_id, customerId, won ? prize.id : null, won ? 1 : 0, won ? 'pending' : 'lose', JSON.stringify(snapshot), prize?.category === 'cash' ? null : (store?.id || null), now, expiresAt, now);
       const codeUpdate = await execute(this.db, "UPDATE redeem_codes SET status='redeemed', redeemed_at=?, redemption_id=? WHERE code=? AND status='unused'", now, id, code);
       assert(Number(codeUpdate.changes) === 1, 409, 'ERR_USED', '该兑换码已被使用，同一卡密仅可兑奖一次');
       if (won) {
-        await this.notice(customerId, 'win', '恭喜中奖', `您通过兑换码 ${code} 抽中「${prize.name}」，${setting.prize_valid_days} 天内到店核销有效。`, code);
+        await this.notice(customerId, 'win', '恭喜中奖', `您通过兑换码 ${code} 抽中「${prize.name}」，${prize.category === 'cash' ? '请在有效期内打开红包凭证领取到微信零钱。' : prize.category === 'exchange' ? '请到店支付换购金额后核销领取一袋。' : setting.prize_valid_days + ' 天内到店核销有效。'}`, code);
         if (prize.stock - 1 <= prize.low_stock_threshold) {
           await this.audit({
             actorType: 'system',
@@ -391,9 +413,7 @@ export class PlatformService {
           });
         }
       } else {
-        const couponId = randomId('CP');
-        await execute(this.db, 'INSERT INTO coupons VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)', couponId, customerId, id, '满 20 减 3 元', '未中奖补偿券', 300, 2000, 'valid', `兑换码 ${code}`, now, now + 30 * DAY);
-        await this.notice(customerId, 'coupon', '优惠券已到账', '很遗憾本次未中奖，平台已为您发放「满 20 减 3 元」优惠券。');
+        await this.notice(customerId, 'result', '谢谢惠顾', '本次未中奖，感谢参与倌榔活动。', code);
       }
       await this.audit({
         actorType: 'customer',
@@ -415,7 +435,7 @@ export class PlatformService {
       return {
         ok: true,
         code: won ? 'OK_WIN' : 'OK_LOSE',
-        msg: won ? '恭喜中奖' : '很遗憾，未中奖',
+        msg: won ? '恭喜中奖' : '谢谢惠顾',
         stockOut,
         record: redemptionView(row)
       };
@@ -554,6 +574,7 @@ export class PlatformService {
     const row = await queryOne(this.db, redemptionJoin + ' WHERE r.code=?', code);
     assert(row, 404, 'ERR_NOT_FOUND', '未查询到该兑换码对应的订单');
     const record = redemptionView(row);
+    assert(record.prizeType !== 'cash', 409, 'ERR_CASH_STORE', '现金红包由顾客在微信领取，门店不可核销');
     assert(record.win, 409, 'ERR_NOT_WIN', '该兑换码本次未中奖，无需核销');
     if (record.status === 'verified') throw Object.assign(apiError(409, 'ERR_DUP', `该订单已在「${record.storeName}」核销`), {
       record
@@ -567,12 +588,13 @@ export class PlatformService {
       record
     };
   }
-  async verify(account, codeValue, position, ip = '') {
+  async verify(account, codeValue, position, ip = '', exchangePaid = false) {
     const code = String(codeValue || '').trim().toUpperCase();
     await this.expireOrders();
     try {
       return await transaction(this.db, async () => {
         const record = (await this.verifyLookup(account, code, false)).record;
+        assert(record.prizeType !== 'exchange' || exchangePaid === true, 409, 'ERR_EXCHANGE_PAYMENT', '请先确认已收取换购金额并交付一袋商品');
         const now = Date.now();
         let storeId = account.store_id;
         if (account.role === 'hq') storeId = record.preferStoreId || (await queryOne(this.db, "SELECT id FROM stores WHERE status='active' ORDER BY id LIMIT 1"))?.id;
@@ -703,7 +725,7 @@ export class PlatformService {
     return paged(rows.map(row => this.auditView(row)), total, page, pageSize);
   }
   async storePrizeLibrary() {
-    return (await queryAll(this.db, 'SELECT p.*, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id ORDER BY p.value_cents DESC')).map(row => prizeView(row));
+    return (await queryAll(this.db, 'SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id ORDER BY p.value_cents DESC')).map(row => prizeView(row));
   }
   async storeStaff(account) {
     assert(account.role === 'owner' || account.role === 'hq', 403, 'ERR_PERMISSION', '无员工管理权限');
@@ -866,7 +888,7 @@ export class PlatformService {
       SUM(CASE WHEN status='frozen' THEN 1 ELSE 0 END) AS frozen
       FROM redemptions`);
     const codeStats = await queryAll(this.db, 'SELECT status, COUNT(*) AS count FROM redeem_codes GROUP BY status');
-    const lowStock = (await queryAll(this.db, `SELECT p.*, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id WHERE p.status='active' AND p.stock<=p.low_stock_threshold ORDER BY p.stock`)).map(prizeView);
+    const lowStock = (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.status='active' AND p.stock<=p.low_stock_threshold ORDER BY p.stock`)).map(prizeView);
     const stores = (await queryAll(this.db, `SELECT s.id, s.short_name, COUNT(r.id) AS verified FROM stores s LEFT JOIN redemptions r ON r.verified_store_id=s.id AND r.status='verified' GROUP BY s.id ORDER BY verified DESC`)).map(row => ({
       id: row.id,
       name: row.short_name,
@@ -1066,9 +1088,10 @@ export class PlatformService {
       where += ' AND p.name LIKE ?';
       params.push(`%${text(query.keyword, 80)}%`);
     }
-    return (await queryAll(this.db, `SELECT p.*, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id ${where} ORDER BY p.created_at DESC`, ...params)).map(prizeView);
+    return (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id ${where} ORDER BY p.created_at DESC`, ...params)).map(prizeView);
   }
   async savePrize(admin, id, body, ip = '') {
+    return transaction(this.db, async () => {
     this.assertAdminWrite(admin);
     const current = id ? await queryOne(this.db, 'SELECT * FROM prizes WHERE id=?', id) : null;
     if (id) assert(current, 404, 'ERR_PRIZE_NOT_FOUND', '奖品不存在');
@@ -1078,8 +1101,16 @@ export class PlatformService {
     assert(await queryOne(this.db, 'SELECT id FROM prize_pools WHERE id=?', poolId), 404, 'ERR_POOL_NOT_FOUND', '奖池不存在');
     const status = body.status == null ? current?.status || 'active' : text(body.status, 20);
     assert(PRIZE_STATUSES.has(status), 400, 'ERR_STATUS', '奖品状态不正确');
+    const category = body.type == null ? current?.category || 'goods' : text(body.type, 30);
+    assert(new Set(['goods', 'exchange', 'cash', 'coupon']).has(category), 400, 'ERR_PRIZE_TYPE', '奖品类型不正确');
+    const oldRule = current ? await queryOne(this.db, 'SELECT exchange_cents FROM prize_reward_rules WHERE prize_id=?', id) : null;
+    const exchangeCents = category === 'exchange' ? integer(body.exchangeCents ?? oldRule?.exchange_cents ?? 0, '换购补款金额', 1, 10000000) : 0;
+    const valueCents = body.valueCents ?? current?.value_cents ?? 0;
+    assert(category !== 'exchange' || exchangeCents < valueCents, 400, 'ERR_EXCHANGE_AMOUNT', '换购补款金额必须小于整袋商品价值');
+    assert(category !== 'cash' || (valueCents > 0 && valueCents <= this.config.transfer.maxCents), 400, 'ERR_CASH_AMOUNT', '红包金额必须在已配置的单笔范围内');
     const row = [poolId, body.name == null ? current?.name : requiredText(body.name, '奖品名称', 100), body.spec == null ? current?.specification || '' : text(body.spec, 100), body.level == null ? current?.level || '' : text(body.level, 50), body.type == null ? current?.category || 'goods' : text(body.type, 30), body.valueCents == null ? current?.value_cents : integer(body.valueCents, '奖品价值', 0, 100000000), body.stock == null ? current?.stock : integer(body.stock, '库存', 0, 100000000), body.sent == null ? current?.sent_count || 0 : integer(body.sent, '已发数量', 0, 100000000), body.lowStockThreshold == null ? current?.low_stock_threshold || 10 : integer(body.lowStockThreshold, '预警阈值', 0, 100000000), body.weight == null ? current?.weight || 1 : numberValue(body.weight, '抽奖权重', 0.0001, 100000), body.img == null ? current?.image || '' : text(body.img, 500), status];
     if (current) await execute(this.db, 'UPDATE prizes SET pool_id=?,name=?,specification=?,level=?,category=?,value_cents=?,stock=?,sent_count=?,low_stock_threshold=?,weight=?,image=?,status=?,updated_at=? WHERE id=?', ...row, now, id);else await execute(this.db, 'INSERT INTO prizes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', finalId, ...row, now, now);
+    await execute(this.db, 'INSERT INTO prize_reward_rules (prize_id,exchange_cents) VALUES (?,?) ON DUPLICATE KEY UPDATE exchange_cents=VALUES(exchange_cents)', finalId, exchangeCents);
     await this.audit({
       actorType: 'admin',
       actorId: admin.id,
@@ -1090,7 +1121,8 @@ export class PlatformService {
       ip,
       result: '保存成功'
     });
-    return prizeView(await queryOne(this.db, 'SELECT p.*,pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id WHERE p.id=?', finalId));
+    return prizeView(await queryOne(this.db, 'SELECT p.*,rr.exchange_cents,pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.id=?', finalId));
+    });
   }
   async batches(query = {}) {
     const params = [];
@@ -1402,9 +1434,12 @@ export class PlatformService {
     return (await queryAll(this.db, redemptionJoin + where + ' ORDER BY r.redeemed_at DESC', ...params)).map(redemptionView);
   }
   async freezeRedemption(admin, id, freeze, reason, ip = '') {
+    return transaction(this.db, async () => {
     this.assertAdminWrite(admin);
-    const row = await queryOne(this.db, 'SELECT * FROM redemptions WHERE id=?', id);
+    const row = await queryOne(this.db, 'SELECT * FROM redemptions WHERE id=? FOR UPDATE', id);
     assert(row, 404, 'ERR_RECORD_NOT_FOUND', '订单不存在');
+    assert(!await queryOne(this.db, 'SELECT redemption_id FROM cash_rewards WHERE redemption_id=?', id), 409, 'ERR_CASH_IN_FLIGHT', '红包已发起领取，请先核对微信转账结果');
+
     if (freeze) {
       assert(row.status === 'pending', 409, 'ERR_RECORD_STATE', '仅待核销订单可以冻结');
       const why = requiredText(reason, '冻结原因', 300);
@@ -1428,6 +1463,7 @@ export class PlatformService {
       }
     });
     return redemptionView(await queryOne(this.db, redemptionJoin + ' WHERE r.id=?', id));
+    });
   }
   async customers(query = {}) {
     const {

@@ -6,7 +6,7 @@ export function settingView(row) {
   return {
     brand: row.brand,
     brandEn: row.brand_en,
-    brandMark: row.brand_mark || '榔',
+    brandMark: row.brand_mark || '倌',
     brandLogo: row.brand_logo || '',
     adminSubtitle: row.admin_subtitle || '总部运营中枢',
     actName: row.activity_name,
@@ -69,6 +69,8 @@ export function prizeView(row, publicView = false) {
     type: row.category,
     value: row.value_cents / 100,
     valueCents: row.value_cents,
+    exchangeCents: Number(row.exchange_cents || 0),
+    exchangeAmount: Number(row.exchange_cents || 0) / 100,
     img: row.image,
     on: row.status === 'active',
     status: row.status
@@ -138,6 +140,10 @@ export function redemptionView(row) {
     prizeLevel: prize.level || '',
     prizeSpec: prize.specification || '',
     prizeType: prize.category || '',
+    exchangeCents: Number(prize.exchangeCents || 0),
+    exchangeAmount: Number(prize.exchangeCents || 0) / 100,
+    selectedCard: prize.selectedCard || null,
+    cashState: row.cash_state || '',
     redeemAt: row.redeemed_at,
     expiresAt: row.expires_at,
     expireAt: row.expires_at,
@@ -162,12 +168,13 @@ export function redemptionView(row) {
 }
 
 export const redemptionJoin = `
-  SELECT r.*, b.name AS batch_name, b.price_cents, pp.name AS pool_name,
+  SELECT r.*, cr.state AS cash_state, b.name AS batch_name, b.price_cents, pp.name AS pool_name,
          c.nickname AS customer_nickname, c.phone AS customer_phone, c.avatar AS customer_avatar,
          ps.short_name AS preferred_store_name, ps.address AS preferred_store_address,
          vs.short_name AS verified_store_name, vs.address AS verified_store_address,
          sa.name AS verified_by_name, sa.username AS verified_by_username
   FROM redemptions r
+  LEFT JOIN cash_rewards cr ON cr.redemption_id = r.id
   JOIN batches b ON b.id = r.batch_id
   JOIN prize_pools pp ON pp.id = r.pool_id
   JOIN customers c ON c.id = r.customer_id

@@ -1,5 +1,5 @@
 import { queryAll } from './database.js'
-import { excelResponse, formatDateTime, spreadsheetXml } from './http-utils.js'
+import { assert, excelResponse, formatDateTime, spreadsheetXml } from './http-utils.js'
 
 function route(method, pattern, options, handler) {
   const names = []
@@ -14,7 +14,7 @@ function redemptionColumns() {
   return [
     {label:'订单号',value:'orderNo'}, {label:'兑换码',value:'code'}, {label:'批次',value:'batchId'},
     {label:'用户昵称',value:'userNick'}, {label:'手机号',value:'userPhone'}, {label:'是否中奖',value:r=>r.win?'是':'否'},
-    {label:'奖品',value:'prizeName'}, {label:'奖品价值（元）',value:'prizeValue'}, {label:'状态',value:'status'},
+    {label:'奖品',value:'prizeName'}, {label:'奖励类型',value:'prizeType'}, {label:'到店补款（元）',value:'exchangeAmount'}, {label:'红包状态',value:'cashState'}, {label:'奖品价值（元）',value:'prizeValue'}, {label:'状态',value:'status'},
     {label:'意向门店编号',value:'preferStoreId'}, {label:'意向门店',value:'preferStoreName'}, {label:'意向门店地址',value:'preferStoreAddress'},
     {label:'核销门店编号',value:'storeId'}, {label:'核销门店',value:'storeName'}, {label:'核销门店地址',value:'storeAddress'},
     {label:'核销人员',value:'verifiedBy'}, {label:'核销账号',value:'verifiedByUsername'}, {label:'核销位置',value:'verifiedPosition'},
@@ -45,6 +45,13 @@ export function createRoutes(service) {
   add('GET','/api/customer/bootstrap',{auth:'customer'},({auth})=>service.customerBootstrap(auth.sub))
   add('GET','/api/customer/records',{auth:'customer'},({auth,query})=>service.customerRecords(auth.sub,query))
   add('GET','/api/customer/records/:id',{auth:'customer'},({auth,params})=>service.customerRecord(auth.sub,params.id))
+  add('POST','/api/customer/draw',{auth:'customer'},({auth,body,ip})=>{
+    assert(Number.isInteger(body.selectedCard) && body.selectedCard >= 1 && body.selectedCard <= 6,400,'ERR_CARD','请选择一张卡牌');
+    return service.redeem(auth.sub,body.code,body.preferredStoreId,ip,body.selectedCard);
+  })
+  add('POST','/api/customer/records/:id/cash/claim',{auth:'customer'},({auth,params,ip})=>service.cash.claim(auth.sub,params.id,ip))
+  add('GET','/api/customer/records/:id/cash',{auth:'customer'},({auth,params})=>service.cash.status(auth.sub,params.id))
+  add('GET','/api/admin/cash-rewards',{auth:'admin'},()=>service.cash.adminList())
   add('POST','/api/customer/redeem',{auth:'customer'},({auth,body,ip})=>service.redeem(auth.sub,body.code,body.preferredStoreId,ip))
   add('PATCH','/api/customer/records/:id/preferred-store',{auth:'customer'},({auth,params,body})=>service.updatePreferredStore(auth.sub,params.id,body.storeId))
   add('GET','/api/customer/coupons',{auth:'customer'},({auth})=>service.customerCoupons(auth.sub))
@@ -60,7 +67,7 @@ export function createRoutes(service) {
     return Symbol.for('response.sent')
   })
   add('GET','/api/store/orders/:code/verify-preview',{auth:'store'},({account,params})=>service.verifyLookup(account,params.code))
-  add('POST','/api/store/orders/:code/verify',{auth:'store'},({account,params,body,ip})=>service.verify(account,params.code,body.position,ip))
+  add('POST','/api/store/orders/:code/verify',{auth:'store'},({account,params,body,ip})=>service.verify(account,params.code,body.position,ip,body.exchangePaid))
   add('GET','/api/store/stats',{auth:'store'},({account})=>service.storeStats(account))
   add('GET','/api/store/trend',{auth:'store'},({account})=>service.storeTrend(account))
   add('GET','/api/store/rank',{auth:'store'},({account})=>service.storeRank(account))

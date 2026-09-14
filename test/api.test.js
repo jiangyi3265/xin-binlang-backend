@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createApp } from '../src/server.js'
-import { queryOne } from '../src/database.js'
+import { queryOne, execute } from '../src/database.js'
 import { createRoutes } from '../src/routes.js'
 import { buildOpenApi } from '../src/openapi.js'
 
@@ -57,6 +57,8 @@ test.before(async()=>{
     uploadDir:join(tempDir,'uploads'),
     host:'127.0.0.1',port:0,tokenSecret:randomBytes(32).toString('hex')
   })
+  // This suite verifies store fulfillment. Cash settlement has its own isolated mock-transport suite.
+  await execute(app.db, "UPDATE prizes SET status='disabled' WHERE category='cash'")
   await new Promise((resolve,reject)=>{app.server.once('error',reject);app.server.listen(0,'127.0.0.1',resolve)})
   base=`http://127.0.0.1:${app.server.address().port}`
 })
@@ -82,9 +84,9 @@ test('公开端点、错误格式与跨角色鉴权',async()=>{
   assert.equal(health.data.status,'ok')
   const config=await request('/api/public/config')
   assert.equal(config.data.dailyLimit,0)
-  assert.equal(config.data.brandMark,'榔')
+  assert.equal(config.data.brandMark,'倌')
   assert.equal(config.data.brandLogo,'')
-  assert.deepEqual(config.data.flow.map(item=>item.title),['购买活动产品','获取数字兑换码','微信登录兑奖','到店出示凭证'])
+  assert.deepEqual(config.data.flow.map(item=>item.title),['购买活动产品','获取数字兑换码','登录后自主选牌','按奖励领取'])
   assert.match(config.data.flow[1].description,/6 位数字兑换码/)
   const stores=await request('/api/public/stores')
   assert.equal(stores.data.length,6)
@@ -181,6 +183,8 @@ test('admin-generated code is redeemed by customer and verified by store',async(
   const generated=await request('/api/admin/batches/JL2601/codes/generate',{method:'POST',token:adminToken,body:{count:1}})
   const code=generated.data.codes[0]
   assert.match(code,/^\d{6}$/)
+  const physical = await queryOne(app.db, "SELECT id FROM prizes WHERE pool_id='P-A' AND category='goods' AND stock>0 LIMIT 1")
+  await execute(app.db, "UPDATE redeem_codes SET forced_outcome='win',forced_prize_id=? WHERE code=?", physical.id, code)
 
   const token=await customerToken('demo-customer')
   const redeemed=await request('/api/customer/redeem',{method:'POST',token,body:{code,preferredStoreId:'S01'}})
@@ -213,9 +217,9 @@ test('all three portals can load their complete production API surface',async()=
   assert.ok(customerRecords.data.length)
   const customerRecord=await request(`/api/customer/records/${customerRecords.data[0].id}`,{token:customerSessionToken})
   assert.equal(customerRecord.response.status,200)
-  const pendingRecord=customerRecords.data.find(item=>item.status==='pending')
+  const pendingRecord=customerRecords.data.find(item=>item.status==='pending'&&item.prizeType!=='cash')
   if(pendingRecord){
-    const preferred=await request(`/api/customer/records/${pendingRecord.id}/preferred-store`,{method:'PATCH',token:customerSessionToken,body:{storeId:'S01'}})
+    const preferred=await request(`/api/customer/records/${pendingRecord.id}/preferred-store`,{method:'PATCH',token:customerSessionToken,body:{storeId:'S02'}})
     assert.equal(preferred.response.status,200)
   }
   const notices=await request('/api/customer/notices',{token:customerSessionToken})

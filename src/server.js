@@ -101,7 +101,7 @@ export async function createApp(overrides={}) {
   const service=new PlatformService(db,config)
   const routes=createRoutes(service)
   const limit=createRateLimiter()
-  const expirationTimer=setInterval(()=>{Promise.all([service.expireOrders(),service.enqueueExpiringReminders()]).catch(error=>console.error('[background:expiration]',error))},60_000)
+  const expirationTimer=setInterval(()=>{Promise.all([service.expireOrders(),service.enqueueExpiringReminders(),service.cash.reconcile()]).catch(error=>console.error('[background:expiration]',error))},60_000)
   const notificationTimer=setInterval(()=>{service.processNotificationOutbox().catch(error=>console.error('[background:notification]',error))},15_000)
   expirationTimer.unref()
   notificationTimer.unref()
@@ -124,7 +124,7 @@ export async function createApp(overrides={}) {
       // 都要重新换 code，配额太小会把正常用户挡在门外。
       if(url.pathname==='/api/customer/auth/wechat')limit(`${ip}:wechat-login`,60,5*60_000)
       else if(url.pathname.includes('/auth/'))limit(`${ip}:login`,12,5*60_000)
-      if(url.pathname.endsWith('/redeem')||url.pathname.endsWith('/verify'))limit(`${ip}:write`,20,60_000)
+      if(url.pathname.endsWith('/draw')||url.pathname.endsWith('/claim')||url.pathname.endsWith('/redeem')||url.pathname.endsWith('/verify'))limit(`${ip}:write`,20,60_000)
       const body=await parseBody(req)
       const auth=await authenticate(matched.route,req,service,config)
       const query=Object.fromEntries(url.searchParams.entries())
@@ -151,7 +151,7 @@ export async function start(overrides={}) {
   const app=await createApp(overrides)
   await new Promise((resolveStart,reject)=>{app.server.once('error',reject);app.server.listen(app.config.port,app.config.host,resolveStart)})
   const address=app.server.address()
-  console.log(`金榔记平台已启动：http://${app.config.host}:${address.port}`)
+  console.log(`倌榔平台已启动：http://${app.config.host}:${address.port}`)
   console.log(`总部管理后台：http://${app.config.host}:${address.port}/admin`)
   console.log(`OpenAPI 文档：http://${app.config.host}:${address.port}/api/openapi.json`)
   return app

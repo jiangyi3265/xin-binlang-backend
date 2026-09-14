@@ -1,0 +1,157 @@
+name: Deploy split repositories
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Publish to production (false only validates build and SSH access)
+        required: true
+        default: false
+        type: boolean
+      backend_ref:
+        description: Backend branch, tag or commit
+        required: true
+        default: main
+        type: string
+      admin_ref:
+        description: Admin branch, tag or commit
+        required: true
+        default: main
+        type: string
+      app_ref:
+        description: App branch, tag or commit
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xin-binlang-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RELEASE_ID: split-${{ github.run_id }}-${{ github.run_attempt }}
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: xin_binlang_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: jiangyi3265/xin-binlang-backend
+          ref: ${{ inputs.backend_ref }}
+          path: backend
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: jiangyi3265/xin-binlang-admin
+          ref: ${{ inputs.admin_ref }}
+          path: 总部管理后台
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: jiangyi3265/xin-binlang-app
+          ref: ${{ inputs.app_ref }}
+          path: 槟榔小程序端
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install and test API
+        working-directory: backend
+        env:
+          TEST_DB_HOST: 127.0.0.1
+          TEST_DB_PORT: 3306
+          TEST_DB_USER: root
+          TEST_DB_PASSWORD: ""
+          TEST_DB_NAME: xin_binlang_test
+        run: |
+          npm ci
+          npm test
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Check and build both clients
+        working-directory: 槟榔小程序端
+        env:
+          VITE_API_ORIGIN: https://xbinglangs.oksja.cn
+          VITE_USE_WECHAT_LOGIN: "true"
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run check
+          pnpm run build:h5
+          pnpm run build:mp-weixin
+      - name: Record source revisions
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process'
+          import { writeFileSync } from 'node:fs'
+          const repositories = { backend: 'backend', admin: '总部管理后台', app: '槟榔小程序端' }
+          const revisions = Object.fromEntries(Object.entries(repositories).map(([name, dir]) =>
+            [name, execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()]))
+          writeFileSync('release-manifest.json', JSON.stringify({ releaseId: process.env.RELEASE_ID, revisions }, null, 2) + '\n')
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xin-binlang-mp-weixin-${{ env.RELEASE_ID }}
+          path: |
+            槟榔小程序端/dist/build/mp-weixin
+            release-manifest.json
+          retention-days: 14
+      - name: Package release
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='backend/uploads' \
+            --exclude='backend/data' \
+            --exclude='槟榔小程序端/dist/build/mp-weixin' \
+            -czf "${RUNNER_TEMP}/xin-binlang-${RELEASE_ID}.tar.gz" \
+            backend 总部管理后台 槟榔小程序端 release-manifest.json
+      - name: Configure SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Verify deployment access
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o ConnectTimeout=15 "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            'set -e; test -x /opt/xin-binlang/scripts/deploy.sh; test -r /etc/systemd/system/xin-binlang.service; if test -L /opt/xin-binlang/current; then systemctl is-active --quiet xin-binlang.service; curl -fsS --max-time 10 http://127.0.0.1:8897/api/health >/dev/null; fi'
+          echo 'Deployment access verified; existing releases checked when present.'
+      - name: Upload and deploy
+        if: ${{ inputs.deploy }}
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          archive="xin-binlang-${RELEASE_ID}.tar.gz"
+          remote="/tmp/${archive}"
+          scp "${RUNNER_TEMP}/${archive}" "${DEPLOY_USER}@${DEPLOY_HOST}:${remote}"
+          ssh "${DEPLOY_USER}@${DEPLOY_HOST}" "sudo /opt/xin-binlang/scripts/deploy.sh '${remote}' '${RELEASE_ID}'"

@@ -12,7 +12,7 @@
 - Excel XML 报表导出、图片上传、审计日志、到期扫描和微信订阅消息队列。
 - 微信登录接口、角色与门店数据隔离、请求限流、CORS 和安全响应头。
 
-本仓库包含后端代码；后台页面和用户端在关联仓库独立维护。生产域名及微信凭据尚未配置。
+本仓库包含后端代码；后台页面和用户端在关联仓库独立维护。生产 API 与 H5 使用 `https://xbinglangs.oksja.cn`，管理后台使用 `https://xbinglangsht.oksja.cn`。本仓库的 `Deploy split repositories` 手动工作流统一组装和发布三端；运行凭据只保存在独立服务器环境文件及 Actions Secrets 中。
 
 ## 技术栈
 

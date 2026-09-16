@@ -481,3 +481,36 @@ test('失效批次、黑名单与库存耗尽由服务端拒绝，兑奖次数�
   const additional=await request('/api/customer/redeem',{method:'POST',token:limitCustomerToken,body:{code:unused}})
   assert.equal(additional.response.status,200)
 })
+
+test('all admin prize rows and low-stock alerts retain inventory fields while public rows omit them',async(context)=>{
+  const previousRequestIp=requestIp
+  requestIp='198.51.100.210'
+  context.after(()=>{requestIp=previousRequestIp})
+  const login=await request('/api/admin/auth/login',{method:'POST',body:{username:'admin',password:testPasswords.admin}})
+  assert.equal(login.response.status,200,login.error?.message)
+  const token=login.data.token
+  const pool=await request('/api/admin/pools',{method:'POST',token,body:{name:'库存列表回归',tier:'30元'}})
+  const expected=new Map()
+  for(const stock of [3,5]){
+    const saved=await request('/api/admin/prizes',{method:'POST',token,body:{poolId:pool.data.id,name:`库存字段奖项${stock}`,type:'goods',valueCents:3000,stock,weight:stock/10,sent:0,lowStockThreshold:10,status:'active'}})
+    assert.equal(saved.response.status,200)
+    expected.set(saved.data.id,saved.data)
+  }
+  const listing=await request('/api/admin/prizes?poolId='+pool.data.id,{token})
+  const dashboard=await request('/api/admin/dashboard',{token})
+  assert.equal(listing.response.status,200,listing.error?.message)
+  assert.equal(dashboard.response.status,200,dashboard.error?.message)
+  for(const rows of [listing.data,dashboard.data.lowStock.filter(row=>expected.has(row.id))]){
+    assert.equal(rows.length,2)
+    for(const row of rows){
+      for(const field of ['stock','sent','weight','lowStockThreshold','createdAt','updatedAt']){
+        assert.equal(row[field],expected.get(row.id)[field],`${row.id} must retain ${field}`)
+      }
+    }
+  }
+  const publicRows=(await request('/api/public/prizes')).data.filter(row=>expected.has(row.id))
+  assert.equal(publicRows.length,2)
+  for(const row of publicRows){
+    for(const field of ['stock','sent','weight','lowStockThreshold']) assert.equal(Object.hasOwn(row,field),false)
+  }
+})

@@ -888,7 +888,7 @@ export class PlatformService {
       SUM(CASE WHEN status='frozen' THEN 1 ELSE 0 END) AS frozen
       FROM redemptions`);
     const codeStats = await queryAll(this.db, 'SELECT status, COUNT(*) AS count FROM redeem_codes GROUP BY status');
-    const lowStock = (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.status='active' AND p.stock<=p.low_stock_threshold ORDER BY p.stock`)).map(prizeView);
+    const lowStock = (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.status='active' AND p.stock<=p.low_stock_threshold ORDER BY p.stock`)).map(row => prizeView(row));
     const stores = (await queryAll(this.db, `SELECT s.id, s.short_name, COUNT(r.id) AS verified FROM stores s LEFT JOIN redemptions r ON r.verified_store_id=s.id AND r.status='verified' GROUP BY s.id ORDER BY verified DESC`)).map(row => ({
       id: row.id,
       name: row.short_name,
@@ -1088,7 +1088,7 @@ export class PlatformService {
       where += ' AND p.name LIKE ?';
       params.push(`%${text(query.keyword, 80)}%`);
     }
-    return (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id ${where} ORDER BY p.created_at DESC`, ...params)).map(prizeView);
+    return (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id ${where} ORDER BY p.created_at DESC`, ...params)).map(row => prizeView(row));
   }
   async savePrize(admin, id, body, ip = '') {
     return transaction(this.db, async () => {

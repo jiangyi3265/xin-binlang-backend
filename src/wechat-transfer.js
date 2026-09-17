@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { createPrivateKey, createPublicKey, randomBytes, sign, verify } from 'node:crypto'
 import { apiError } from './http-utils.js'
+import { cashProviderErrorId } from './cash-errors.js'
 
 const ENDPOINT = 'https://api.mch.weixin.qq.com'
 const BILL_PATH = '/v3/fund-app/mch-transfer/transfer-bills'
@@ -45,7 +46,12 @@ export class WechatTransfer {
     if (!response.ok) {
       // A transport/API error is not a payment result. The caller reconciles the same bill.
       const error = apiError(409, 'ERR_CASH_PENDING', '领取结果正在确认，请稍后刷新，勿重复提交')
-      try { error.providerCode = JSON.parse(raw).code } catch {}
+      try {
+        const failure = JSON.parse(raw)
+        error.providerCode = /^[A-Z0-9_]{1,48}$/.test(String(failure.code || '')) ? failure.code : 'WECHAT_REJECTED'
+        error.providerErrorId = cashProviderErrorId(error.providerCode, failure.message)
+      } catch {}
+      error.providerStatus = response.status
       throw error
     }
     const ts = response.headers.get('Wechatpay-Timestamp')

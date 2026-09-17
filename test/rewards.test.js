@@ -154,3 +154,36 @@ test('invalid provider amount never settles; failed transfers are never silently
   await ledger.claim(customer.id, record.id)
   assert.equal(calls, 1)
 })
+
+test('a rejected create stays visible after NOT_FOUND polling and only an explicit claim retries the same bill', async () => {
+  const ledger = app.service.cash
+  let creates = 0, originalBill
+  const denial = () => Object.assign(new Error('private provider response'), {
+    providerCode: 'INVALID_REQUEST', providerErrorId: 'INVALID_REQUEST:APPID_MCHID_MISMATCH', providerStatus: 400
+  })
+  ledger.provider = {
+    async create(row) {
+      creates++
+      if (originalBill) assert.equal(row.out_bill_no, originalBill)
+      originalBill = row.out_bill_no
+      throw denial()
+    },
+    async query() { throw Object.assign(new Error('not found'), { providerCode: 'NOT_FOUND' }) }
+  }
+  const code = await codeFor(cash)
+  const record = (await api('/api/customer/draw', { code, selectedCard: 1 })).data.record
+  const rejected = await ledger.claim(customer.id, record.id)
+  assert.equal(rejected.state, 'UNKNOWN')
+  assert.match(rejected.message, /小程序尚未关联/)
+  await execute(app.db, 'UPDATE cash_rewards SET lease_until=0 WHERE redemption_id=?', record.id)
+  const polled = await ledger.status(customer.id, record.id)
+  assert.equal(polled.message, rejected.message)
+  assert.equal(creates, 1)
+  const audit = await queryOne(app.db, "SELECT detail_json FROM audit_logs WHERE entity_id=? AND action='cash_provider_error'", record.id)
+  assert.ok(audit)
+  assert.equal(JSON.stringify(audit).includes('private provider response'), false)
+  await execute(app.db, 'UPDATE cash_rewards SET lease_until=0 WHERE redemption_id=?', record.id)
+  await ledger.claim(customer.id, record.id)
+  assert.equal(creates, 2)
+  assert.equal((await queryOne(app.db, 'SELECT status FROM redemptions WHERE id=?', record.id)).status, 'pending')
+})

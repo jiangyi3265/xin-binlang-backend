@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { execute, parseJson, queryAll, queryOne, transaction } from './database.js'
 import { assert } from './http-utils.js'
 import { WechatTransfer, transferReady } from './wechat-transfer.js'
+import { cashErrorMessage } from './cash-errors.js'
 
 const TERMINAL = new Set(['SUCCESS', 'FAIL', 'CANCELLED', 'REVIEW_REQUIRED'])
 const PROVIDER_STATES = new Set(['ACCEPTED', 'PROCESSING', 'WAIT_USER_CONFIRM', 'TRANSFERING', 'SUCCESS', 'FAIL', 'CANCELING', 'CANCELLED'])
@@ -20,8 +21,9 @@ export class CashRewards {
 
   view(row) {
     const state = row?.state || 'NOT_CLAIMED'
+    const message = ['SUBMITTING', 'UNKNOWN'].includes(state) ? cashErrorMessage(row?.last_error) : ''
     return {
-      state, label: LABELS[state] || '正在确认结果', ready: this.ready(),
+      state, label: message || LABELS[state] || '正在确认结果', ready: this.ready(), message,
       amount: Number(row?.amount_cents || 0) / 100,
       ...(state === 'WAIT_USER_CONFIRM' && row.package_info ? {
         confirmation: { mchId: row.mch_id, appId: row.app_id, package: row.package_info }
@@ -84,6 +86,7 @@ export class CashRewards {
   }
 
   async send(row, create, allowCreate = false) {
+    let operation = create ? 'create' : 'query'
     try {
       assert(row.mch_id === this.config.mchId && row.app_id === this.config.appId, 409, 'ERR_CASH_MERCHANT_CHANGED', '商户配置与原订单不一致')
       let reply
@@ -92,18 +95,31 @@ export class CashRewards {
         try { reply = await this.provider.query(row) }
         catch (error) {
           // Only an explicit re-claim may resubmit, and only with the immutable original bill number.
-          if (allowCreate && error.providerCode === 'NOT_FOUND' && Date.now() - row.created_at < 86400000) reply = await this.provider.create(row)
+          if (allowCreate && error.providerCode === 'NOT_FOUND' && Date.now() - row.created_at < 86400000) {
+            operation = 'create'
+            reply = await this.provider.create(row)
+          }
           else throw error
         }
       }
       await this.apply(row, reply)
       if (allowCreate && reply.state === 'WAIT_USER_CONFIRM' && !reply.package_info && !row.package_info) {
+        operation = 'create'
         await this.apply(row, await this.provider.create(row))
       }
     } catch (error) {
       // Do not expose provider payloads, OpenIDs or cryptographic material to clients/logs.
+      const errorId = String(error.providerErrorId || error.providerCode || error.code || 'NETWORK_UNKNOWN').slice(0, 80)
+      const current = await queryOne(this.db, 'SELECT state,last_error FROM cash_rewards WHERE redemption_id=?', row.redemption_id)
+      // A following NOT_FOUND query must not erase the reason the create failed.
+      const savedError = operation === 'query' && errorId === 'NOT_FOUND' && current?.last_error && current.last_error !== 'NETWORK_UNKNOWN'
+        ? current.last_error : errorId
       await execute(this.db, `UPDATE cash_rewards SET state=IF(state='SUBMITTING','UNKNOWN',state),last_error=?,updated_at=? WHERE redemption_id=?
-        AND state NOT IN ('SUCCESS','FAIL','CANCELLED','REVIEW_REQUIRED')`, String(error.providerCode || error.code || 'NETWORK_UNKNOWN').slice(0, 80), Date.now(), row.redemption_id)
+        AND state NOT IN ('SUCCESS','FAIL','CANCELLED','REVIEW_REQUIRED')`, savedError, Date.now(), row.redemption_id)
+      if (operation === 'create' && current && !TERMINAL.has(current.state) && current.last_error !== savedError) {
+        await this.service.audit({ actorType: 'system', action: 'cash_provider_error', entityType: 'redemption', entityId: row.redemption_id,
+          result: cashErrorMessage(savedError), detail: { error: savedError, operation, httpStatus: error.providerStatus || null } })
+      }
     } finally {
       // Short backoff also prevents each UI poll from becoming a provider request.
       await execute(this.db, 'UPDATE cash_rewards SET lease_until=? WHERE redemption_id=?', Date.now() + 5000, row.redemption_id)

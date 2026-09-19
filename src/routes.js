@@ -45,6 +45,7 @@ export function createRoutes(service) {
   add('GET','/api/customer/bootstrap',{auth:'customer'},({auth})=>service.customerBootstrap(auth.sub))
   add('GET','/api/customer/records',{auth:'customer'},({auth,query})=>service.customerRecords(auth.sub,query))
   add('GET','/api/customer/records/:id',{auth:'customer'},({auth,params})=>service.customerRecord(auth.sub,params.id))
+  add('POST','/api/customer/draw/preview',{auth:'customer'},({auth,body})=>service.previewDraw(auth.sub,body.code))
   add('POST','/api/customer/draw',{auth:'customer'},({auth,body,ip})=>{
     assert(Number.isInteger(body.selectedCard) && body.selectedCard >= 1 && body.selectedCard <= 6,400,'ERR_CARD','请选择一张卡牌');
     return service.redeem(auth.sub,body.code,body.preferredStoreId,ip,body.selectedCard);

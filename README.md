@@ -84,6 +84,7 @@ src/
   server.js           HTTP 服务、鉴权与静态文件入口
   routes.js           REST API 路由
   services.js         兑奖、核销、管理与微信业务
+  pool-presentation.js 奖池包装展示配置与批次售价识别
   cash-rewards.js     红包领取台账、幂等处理与状态核对
   wechat-transfer.js  微信商家转账签名请求与响应验签
   database.js         MySQL 表结构、迁移和事务

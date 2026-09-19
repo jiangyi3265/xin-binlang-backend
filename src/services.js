@@ -1,3 +1,4 @@
+import { validatePresentation, resolvePresentation } from './pool-presentation.js';
 import { CashRewards } from './cash-rewards.js';
 import { randomInt } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -55,12 +56,17 @@ export class PlatformService {
     return (await queryAll(this.db, "SELECT * FROM stores WHERE status='active' ORDER BY created_at")).map(storeView);
   }
   async publicPools() {
-    return (await queryAll(this.db, "SELECT * FROM prize_pools WHERE status='active' ORDER BY id")).map(poolView);
+    const rows = await queryAll(this.db, `SELECT pp.*,pd.display_json,
+      (SELECT MIN(price_cents) FROM batches b WHERE b.pool_id=pp.id AND b.status='active') AS display_price_cents,
+      (SELECT COUNT(DISTINCT price_cents) FROM batches b WHERE b.pool_id=pp.id AND b.status='active') AS display_price_count
+      FROM prize_pools pp LEFT JOIN pool_presentations pd ON pd.pool_id=pp.id WHERE pp.status='active' ORDER BY pp.id`);
+    return rows.map(row => ({ ...poolView(row), presentation: resolvePresentation(poolView(row).presentation,
+      Number(row.display_price_count) === 1 ? row.display_price_cents : 0) })).filter(pool => pool.presentation.visible !== false);
   }
   // 未登录也要能看到本期奖品，所以走 prizeView 的公开视图：
   // 只给名称/档位/价值/图片，库存、权重、中奖概率一律不出小程序。
   async publicPrizes() {
-    const rows = await queryAll(this.db, "SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.status='active' ORDER BY p.value_cents DESC");
+    const rows = await queryAll(this.db, "SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id LEFT JOIN pool_presentations pd ON pd.pool_id=pp.id WHERE p.status='active' AND pp.status='active' AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(pd.display_json,'$.visible')),'true')<>'false' ORDER BY p.value_cents DESC");
     return rows.map(row => prizeView(row, true));
   }
   async audit({
@@ -250,8 +256,8 @@ export class PlatformService {
     const customer = customerView(await queryOne(this.db, 'SELECT * FROM customers WHERE id = ?', customerId));
     assert(customer, 401, 'ERR_AUTH', '用户不存在或登录已失效');
     const stores = (await queryAll(this.db, "SELECT * FROM stores WHERE status = 'active' ORDER BY id")).map(storeView);
-    const pools = (await queryAll(this.db, "SELECT * FROM prize_pools WHERE status = 'active' ORDER BY id")).map(poolView);
-    const prizes = (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.status='active' ORDER BY p.value_cents DESC`)).map(row => prizeView(row, true));
+    const pools = await this.publicPools();
+    const prizes = await this.publicPrizes();
     const counts = await queryOne(this.db, `SELECT
       COUNT(*) AS total,
       SUM(CASE WHEN won=1 THEN 1 ELSE 0 END) AS won,
@@ -296,6 +302,37 @@ export class PlatformService {
     const row = await queryOne(this.db, redemptionJoin + ' WHERE r.customer_id=? AND (r.id=? OR r.code=?)', customerId, id, String(id).toUpperCase());
     assert(row, 404, 'ERR_RECORD_NOT_FOUND', '兑奖记录不存在');
     return redemptionView(row);
+  }
+  async previewDraw(customerId, input) {
+    const code = String(input || '').trim().toUpperCase();
+    assert(/^[A-Z0-9]{6}$/.test(code), 400, 'ERR_FORMAT', '请输入完整的 6 位兑换码');
+    const customer = await queryOne(this.db, 'SELECT id,blocked FROM customers WHERE id=?', customerId);
+    assert(customer && !customer.blocked, 403, 'ERR_BLOCKED', '账号受限，请联系客服');
+    const row = await queryOne(this.db, `SELECT rc.status AS code_status, r.customer_id AS owner_id,
+      b.*,pp.status AS pool_status,pd.display_json FROM redeem_codes rc JOIN batches b ON b.id=rc.batch_id
+      JOIN prize_pools pp ON pp.id=b.pool_id LEFT JOIN pool_presentations pd ON pd.pool_id=pp.id
+      LEFT JOIN redemptions r ON r.id=rc.redemption_id WHERE rc.code=?`, code);
+    assert(row, 404, 'ERR_INVALID', '兑换码不存在，请核对包装内卡片');
+    assert(row.code_status === 'unused' || row.owner_id === customerId, 409, 'ERR_USED', '该兑换码已被使用');
+    const now = Date.now();
+    assert(row.status === 'active' && row.pool_status === 'active', 409, 'ERR_BATCH_PAUSED', '该卡密所属活动已暂停');
+    assert(row.starts_at <= now && row.expires_at > now, 409, 'ERR_BATCH_EXPIRED', '该卡密所属批次不在有效期内');
+    const prizes = await this.prizes({ poolId: row.pool_id, status: 'active' });
+    const demand = await queryOne(this.db, `SELECT COUNT(*) AS total,SUM(rc.forced_outcome='lose') AS losses
+      FROM redeem_codes rc JOIN batches b ON b.id=rc.batch_id
+      WHERE b.pool_id=? AND b.status='active' AND b.expires_at>? AND rc.status='unused'`, row.pool_id, now);
+    const stock = prizes.reduce((sum, prize) => sum + Number(prize.stock || 0), 0);
+    const assigned = await queryAll(this.db, `SELECT rc.forced_prize_id AS prize_id, COUNT(*) AS total
+      FROM redeem_codes rc JOIN batches b ON b.id=rc.batch_id
+      WHERE b.pool_id=? AND b.status='active' AND b.expires_at>? AND rc.status='unused'
+        AND rc.forced_prize_id IS NOT NULL GROUP BY rc.forced_prize_id`, row.pool_id, now);
+    const unassigned = Number(demand.total) - assigned.reduce((sum, item) => sum + Number(item.total), 0);
+    const assignedCovered = assigned.every(item => Number(prizes.find(prize => prize.id === item.prize_id)?.stock || 0) >= Number(item.total) + unassigned);
+    return { poolId: row.pool_id, batchId: row.id, productTier: row.product_tier, priceCents: row.price_cents,
+      presentation: resolvePresentation(parseJson(row.display_json, {}), row.price_cents),
+      guaranteed: row.win_rate_ppm === 1000000 && !Number(demand.losses) && stock > 0 && stock >= Number(demand.total) && assignedCovered,
+      prizes: prizes.map(({ id, name, type, valueCents, value, exchangeCents, exchangeAmount, img, spec }) =>
+        ({ id, name, type, valueCents, value, exchangeCents, exchangeAmount, img, spec })) };
   }
   async updatePreferredStore(customerId, id, storeId) {
     const row = await queryOne(this.db, 'SELECT * FROM redemptions WHERE customer_id=? AND id=?', customerId, id);
@@ -995,12 +1032,12 @@ export class PlatformService {
     return settingView(await this.settingsRow());
   }
   async pools() {
-    return (await queryAll(this.db, `SELECT pp.*,
+    return (await queryAll(this.db, `SELECT pp.*,pd.display_json,
       (SELECT COUNT(*) FROM prizes p WHERE p.pool_id=pp.id) AS prize_count,
       (SELECT COUNT(*) FROM batches b WHERE b.pool_id=pp.id) AS batch_count,
       (SELECT COUNT(*) FROM redeem_codes rc JOIN batches b ON b.id=rc.batch_id WHERE b.pool_id=pp.id) AS code_count,
       (SELECT COUNT(*) FROM redemptions r WHERE r.pool_id=pp.id) AS redemption_count
-      FROM prize_pools pp ORDER BY pp.created_at DESC`)).map(row => ({
+      FROM prize_pools pp LEFT JOIN pool_presentations pd ON pd.pool_id=pp.id ORDER BY pp.created_at DESC`)).map(row => ({
       ...poolView(row),
       prizeCount: Number(row.prize_count),
       batchCount: Number(row.batch_count),
@@ -1010,7 +1047,7 @@ export class PlatformService {
   }
   async savePool(admin, id, body, ip = '') {
     this.assertAdminWrite(admin);
-    const current = id ? await queryOne(this.db, 'SELECT * FROM prize_pools WHERE id=?', id) : null;
+    const current = id ? await queryOne(this.db, 'SELECT pp.*,pd.display_json FROM prize_pools pp LEFT JOIN pool_presentations pd ON pd.pool_id=pp.id WHERE pp.id=?', id) : null;
     if (id) assert(current, 404, 'ERR_POOL_NOT_FOUND', '奖池不存在');
     const now = Date.now();
     const finalId = id || randomId('POOL');
@@ -1021,6 +1058,8 @@ export class PlatformService {
       status: body.status == null ? current?.status || 'active' : text(body.status, 20)
     };
     assert(PRIZE_STATUSES.has(values.status), 400, 'ERR_STATUS', '奖池状态不正确');
+    const presentation = validatePresentation(body.presentation ?? (parseJson(current?.display_json, {}) || {}));
+    return await transaction(this.db, async () => {
     try {
       if (current) await execute(this.db, 'UPDATE prize_pools SET name=?,description=?,tier_label=?,status=?,updated_at=? WHERE id=?', values.name, values.desc, values.tier, values.status, now, id);else await execute(this.db, 'INSERT INTO prize_pools VALUES (?, ?, ?, ?, ?, ?, ?)', finalId, values.name, values.desc, values.tier, values.status, now, now);
     } catch (error) {
@@ -1036,7 +1075,9 @@ export class PlatformService {
       ip,
       result: '保存成功'
     });
-    return poolView(await queryOne(this.db, 'SELECT * FROM prize_pools WHERE id=?', finalId));
+    await execute(this.db, 'INSERT INTO pool_presentations (pool_id,display_json) VALUES (?,?) ON DUPLICATE KEY UPDATE display_json=VALUES(display_json)', finalId, JSON.stringify(presentation));
+    return poolView(await queryOne(this.db, 'SELECT pp.*,pd.display_json FROM prize_pools pp LEFT JOIN pool_presentations pd ON pd.pool_id=pp.id WHERE pp.id=?', finalId));
+    });
   }
   async deletePool(admin, id, ip = '') {
     this.assertAdminWrite(admin);

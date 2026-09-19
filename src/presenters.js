@@ -1,4 +1,5 @@
 import { parseJson } from './database.js'
+import { resolvePresentation } from './pool-presentation.js'
 
 export function settingView(row) {
   const notice = parseJson(row.notice_json, {})
@@ -54,7 +55,7 @@ export function storeView(row) {
 
 export function poolView(row) {
   if (!row) return null
-  return { id: row.id, name: row.name, desc: row.description, tier: row.tier_label, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }
+  return { id: row.id, name: row.name, desc: row.description, tier: row.tier_label, presentation: { theme: 'auto', visible: true, productImg: '', backgroundImg: '', ...parseJson(row.display_json, {}) }, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }
 }
 
 export function prizeView(row, publicView = false) {
@@ -122,6 +123,8 @@ export function redemptionView(row) {
     code: row.code,
     batchId: row.batch_id,
     batchName: row.batch_name || '',
+    productTier: row.product_tier || '',
+    presentation: resolvePresentation(parseJson(row.display_json, {}), row.price_cents),
     poolId: row.pool_id,
     poolName: row.pool_name || '',
     price: Number(row.price_cents || 0) / 100,
@@ -168,7 +171,7 @@ export function redemptionView(row) {
 }
 
 export const redemptionJoin = `
-  SELECT r.*, cr.state AS cash_state, b.name AS batch_name, b.price_cents, pp.name AS pool_name,
+  SELECT r.*, cr.state AS cash_state, b.name AS batch_name, b.price_cents, b.product_tier, pd.display_json, pp.name AS pool_name,
          c.nickname AS customer_nickname, c.phone AS customer_phone, c.avatar AS customer_avatar,
          ps.short_name AS preferred_store_name, ps.address AS preferred_store_address,
          vs.short_name AS verified_store_name, vs.address AS verified_store_address,
@@ -177,6 +180,7 @@ export const redemptionJoin = `
   LEFT JOIN cash_rewards cr ON cr.redemption_id = r.id
   JOIN batches b ON b.id = r.batch_id
   JOIN prize_pools pp ON pp.id = r.pool_id
+  LEFT JOIN pool_presentations pd ON pd.pool_id = pp.id
   JOIN customers c ON c.id = r.customer_id
   LEFT JOIN stores ps ON ps.id = r.preferred_store_id
   LEFT JOIN stores vs ON vs.id = r.verified_store_id

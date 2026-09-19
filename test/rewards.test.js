@@ -46,6 +46,35 @@ async function api(path, body, person = customer) {
   return { status: response.status, ...(await response.json()) }
 }
 
+test('code preview chooses the actual batch packaging without drawing and hides private pools from the showcase', async () => {
+  const code = await codeFor(exchange)
+  const before = await queryOne(app.db, 'SELECT COUNT(*) n FROM redemptions')
+  const quantity = await queryOne(app.db, 'SELECT stock FROM prizes WHERE id=?', exchange.id)
+  await app.service.savePool(admin, pool.id, { presentation: { theme: 'gold', visible: false, productImg: '/assets/guanlang-product-30.png' } })
+  const preview = await api('/api/customer/draw/preview', { code })
+  assert.equal(preview.status, 200)
+  assert.equal(preview.data.presentation.theme, 'gold')
+  assert.equal(preview.data.presentation.productImg, '/assets/guanlang-product-30.png')
+  assert.equal(preview.data.poolId, pool.id)
+  assert.equal(preview.data.guaranteed, true)
+  assert.ok(preview.data.prizes.every(p => !('stock' in p) && !('weight' in p)))
+  assert.equal((await queryOne(app.db, 'SELECT status FROM redeem_codes WHERE code=?', code)).status, 'unused')
+  assert.equal((await queryOne(app.db, 'SELECT COUNT(*) n FROM redemptions')).n, before.n)
+  assert.equal((await queryOne(app.db, 'SELECT stock FROM prizes WHERE id=?', exchange.id)).stock, quantity.stock)
+  assert.ok(!(await app.service.publicPools()).some(p => p.id === pool.id))
+  assert.ok(!(await app.service.publicPrizes()).some(p => p.pool === pool.id))
+  const bootstrap = await app.service.customerBootstrap(customer.id)
+  assert.ok(!bootstrap.pools.some(p => p.id === pool.id))
+  assert.ok(!bootstrap.prizes.some(p => p.pool === pool.id))
+  await app.service.savePrize(admin, exchange.id, { stock: 0 })
+  assert.equal((await app.service.previewDraw(customer.id, code)).guaranteed, false)
+  await app.service.savePrize(admin, exchange.id, { stock: quantity.stock })
+  await app.service.redeem(customer.id, code, '', '', 2)
+  assert.equal((await api('/api/customer/draw/preview', { code }, other)).status, 409)
+  await app.service.savePool(admin, pool.id, { presentation: { theme: 'blue', visible: true } })
+  await assert.rejects(app.service.savePool(admin, pool.id, { presentation: { productImg: 'javascript:alert(1)' } }), error => error.code === 'ERR_PRESENTATION')
+})
+
 test('flip choice is required; concurrent retries retain one chosen card, one result and one stock debit', async () => {
   const code = await codeFor(exchange)
   assert.equal((await api('/api/customer/draw', { code, selectedCard: 7 })).status, 400)

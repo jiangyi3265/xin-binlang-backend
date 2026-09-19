@@ -127,6 +127,7 @@ export async function createApp(overrides={}) {
       if(url.pathname.endsWith('/draw')||url.pathname.endsWith('/claim')||url.pathname.endsWith('/redeem')||url.pathname.endsWith('/verify'))limit(`${ip}:write`,20,60_000)
       const body=await parseBody(req)
       const auth=await authenticate(matched.route,req,service,config)
+      if(url.pathname==='/api/customer/draw/preview')limit(`${auth.auth.sub}:draw-preview`,20,60_000)
       const query=Object.fromEntries(url.searchParams.entries())
       const value=await matched.route.handler({req,res,body,query,params:matched.params,ip,requestId,...auth})
       if(value===Symbol.for('response.sent')||res.writableEnded)return

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import { randomBytes } from 'node:crypto'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createApp } from '../src/server.js'
@@ -43,6 +43,9 @@ test.before(async()=>{
     process.env['SEED_' + role + '_PASSWORD'] = testPasswords[role.toLowerCase()]
   }
   tempDir=mkdtempSync(join(tmpdir(),'xin_binlang-api-'))
+  mkdirSync(join(tempDir,'h5/static/tabbar'),{recursive:true})
+  writeFileSync(join(tempDir,'h5/static/tabbar/home.png'),Buffer.from([137,80,78,71,13,10,26,10]))
+  writeFileSync(join(tempDir,'h5/index.html'),'<main>H5 fixture</main>')
   // 平台只支持 MySQL，测试也只在 MySQL 上跑。需要本地起一个 MySQL 8.0，
   // 或用 TEST_DB_* 指向任意可写实例；测试库会被自动建出来。
   app=await createApp({
@@ -55,6 +58,7 @@ test.before(async()=>{
     dbAutoCreate:true,
     dbSeed:true,
     uploadDir:join(tempDir,'uploads'),
+    h5Dir:join(tempDir,'h5'),
     host:'127.0.0.1',port:0,tokenSecret:randomBytes(32).toString('hex')
   })
   // This suite verifies store fulfillment. Cash settlement has its own isolated mock-transport suite.
@@ -480,6 +484,15 @@ test('失效批次、黑名单与库存耗尽由服务端拒绝，兑奖次数�
   const unused=(await queryOne(app.db,"SELECT code FROM redeem_codes WHERE status='unused' AND batch_id='JL2603' LIMIT 1")).code
   const additional=await request('/api/customer/redeem',{method:'POST',token:limitCustomerToken,body:{code:unused}})
   assert.equal(additional.response.status,200)
+})
+
+test('H5 static navigation images are served as images and missing assets do not return HTML',async()=>{
+  const icon=await request('/app/static/tabbar/home.png',{raw:true})
+  assert.equal(icon.status,200)
+  assert.equal(icon.headers.get('content-type'),'image/png')
+  assert.deepEqual(Buffer.from(await icon.arrayBuffer()),Buffer.from([137,80,78,71,13,10,26,10]))
+  assert.equal((await request('/app/static/tabbar/missing.png',{raw:true})).status,404)
+  assert.match(await (await request('/app/',{raw:true})).text(),/H5 fixture/)
 })
 
 test('all admin prize rows and low-stock alerts retain inventory fields while public rows omit them',async(context)=>{

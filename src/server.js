@@ -82,8 +82,9 @@ function staticResponse(req,res,url,config) {
   if(url.pathname.startsWith('/uploads/'))return sendFile(res,config.uploadDir,url.pathname.slice('/uploads/'.length),true)
   if(url.pathname==='/app'||url.pathname==='/app/'||url.pathname.startsWith('/app/')){
     res.setHeader('Content-Security-Policy',"default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
-    const relative=url.pathname.startsWith('/app/assets/')?url.pathname.slice('/app/'.length):'index.html'
-    return sendFile(res,config.h5Dir,relative,url.pathname.startsWith('/app/assets/'))
+    const isAsset=url.pathname.startsWith('/app/assets/')||url.pathname.startsWith('/app/static/')
+    const relative=isAsset?url.pathname.slice('/app/'.length):'index.html'
+    return sendFile(res,config.h5Dir,relative,isAsset)
   }
   if(url.pathname.startsWith('/assets/')){
     const relative=url.pathname.slice('/assets/'.length)

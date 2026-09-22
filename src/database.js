@@ -128,12 +128,16 @@ CREATE TABLE IF NOT EXISTS prizes (
   sent_count INT UNSIGNED NOT NULL DEFAULT 0,
   low_stock_threshold INT UNSIGNED NOT NULL DEFAULT 10,
   weight DECIMAL(12,4) UNSIGNED NOT NULL DEFAULT 1,
+  display_only TINYINT(1) NOT NULL DEFAULT 0,
+  showcase_weight DECIMAL(12,4) UNSIGNED NOT NULL DEFAULT 1,
   image VARCHAR(500) NOT NULL DEFAULT '',
   status ENUM('active','disabled') NOT NULL DEFAULT 'active',
   created_at BIGINT UNSIGNED NOT NULL,
   updated_at BIGINT UNSIGNED NOT NULL,
   CONSTRAINT fk_prizes_pool FOREIGN KEY (pool_id) REFERENCES prize_pools(id) ON DELETE RESTRICT,
-  CONSTRAINT chk_prizes_weight CHECK (weight > 0)
+  CONSTRAINT chk_prizes_weight CHECK (weight > 0),
+  CONSTRAINT chk_prizes_display_only CHECK (display_only IN (0,1)),
+  CONSTRAINT chk_prizes_showcase_weight CHECK (showcase_weight BETWEEN 0 AND 100000)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS batches (
@@ -352,6 +356,7 @@ async function openMysql(config, seed) {
   if (!cashRequestColumn) await execute(db, 'ALTER TABLE cash_rewards ADD COLUMN request_json JSON NULL AFTER amount_cents')
   await migrateSalesManagement(db)
   await migrateReusablePoolNames(db)
+  await migratePrizeShowcase(db)
   const version = await queryOne(db, "SELECT value FROM schema_meta WHERE `key`='seed_version'")
   if (seed && !version) await seedDatabase(db)
   return db
@@ -413,6 +418,20 @@ async function migrateReusablePoolNames(db) {
     const indexName = String(row.index_name).replaceAll('`', '``')
     await execute(db, `ALTER TABLE prize_pools DROP INDEX \`${indexName}\``)
   }
+}
+
+async function migratePrizeShowcase(db) {
+  const rows = await queryAll(db, `SELECT COLUMN_NAME AS column_name FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='prizes' AND COLUMN_NAME IN ('display_only','showcase_weight')`)
+  const columns = new Set(rows.map(row => row.column_name))
+  // Defaults preserve all existing prize eligibility and equal display frequency.
+  if (!columns.has('display_only')) await execute(db, 'ALTER TABLE prizes ADD COLUMN display_only TINYINT(1) NOT NULL DEFAULT 0 AFTER weight')
+  if (!columns.has('showcase_weight')) await execute(db, 'ALTER TABLE prizes ADD COLUMN showcase_weight DECIMAL(12,4) UNSIGNED NOT NULL DEFAULT 1 AFTER display_only')
+  const constraints = await queryAll(db, `SELECT CONSTRAINT_NAME AS constraint_name FROM information_schema.TABLE_CONSTRAINTS
+    WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='prizes' AND CONSTRAINT_NAME IN ('chk_prizes_display_only','chk_prizes_showcase_weight')`)
+  const names = new Set(constraints.map(row => row.constraint_name))
+  if (!names.has('chk_prizes_display_only')) await execute(db, 'ALTER TABLE prizes ADD CONSTRAINT chk_prizes_display_only CHECK (display_only IN (0,1))')
+  if (!names.has('chk_prizes_showcase_weight')) await execute(db, 'ALTER TABLE prizes ADD CONSTRAINT chk_prizes_showcase_weight CHECK (showcase_weight BETWEEN 0 AND 100000)')
 }
 
 export async function openDatabase(config, { seed = config.database.seed } = {}) {

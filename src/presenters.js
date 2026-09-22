@@ -76,7 +76,7 @@ export function prizeView(row, publicView = false) {
     on: row.status === 'active',
     status: row.status
   }
-  if (!publicView) Object.assign(item, { stock: row.stock, sent: row.sent_count, lowStockThreshold: row.low_stock_threshold, weight: row.weight, createdAt: row.created_at, updatedAt: row.updated_at })
+  if (!publicView) Object.assign(item, { stock: row.stock, sent: row.sent_count, lowStockThreshold: row.low_stock_threshold, weight: row.weight, displayOnly: Number(row.display_only || 0) === 1, showcaseWeight: Number(row.showcase_weight ?? 1), createdAt: row.created_at, updatedAt: row.updated_at })
   return item
 }
 

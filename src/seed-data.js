@@ -45,7 +45,7 @@ export async function seedDatabase(db) {
         '倌榔', 'GUANLANG', '开码有奖', '一码一兑 · 开袋见喜', '撕开包装，码上开奖',
         new Date(activeStart).toISOString().slice(0, 10), new Date(activeEnd).toISOString().slice(0, 10),
         DEFAULT_BRAND_BACKGROUND, '/assets/hero-fruit.jpg', DEFAULT_PRODUCT_IMAGE, DEFAULT_BRAND_BACKGROUND,
-        JSON.stringify({ enabled: true, badge: '公告', buttonText: '我知道了', image: '', title: '第三期活动已上线', date: new Date(now).toISOString().slice(0, 10), lines: ['新增臻享奖池，20 元档兑换码专享大奖。', '中奖后请于 30 天内到门店核销。', '当前活动不限制每日兑奖次数。'] }),
+        JSON.stringify({ enabled: true, badge: '公告', buttonText: '我知道了', image: '', title: '第三期活动已上线', date: new Date(now).toISOString().slice(0, 10), lines: ['新增臻享奖池，20 元档兑换码专享大奖。', '中奖后请于 30 天内到门店核销。', '每日兑奖次数以活动设置为准。'] }),
         JSON.stringify(DEFAULT_REDEMPTION_FLOW),
         JSON.stringify({ phone: '400-628-1868', wechat: '', hours: '09:00 - 21:00' }),
         now)
@@ -114,7 +114,9 @@ export async function seedDatabase(db) {
       ['PZ13','P-C','现金红包 ¥5','微信红包','二等奖','cash',500,760,290,80,2.5,'/assets/prize-cash.jpg'],
       ['PZ14','P-C','平台优惠券','满 20 减 3 元','参与奖','coupon',300,9999,650,200,4,'/assets/prize-mug.jpg']
     ].map(row => [...row, 'active', now, now])
-    await runMany(db, 'INSERT INTO prizes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', prizes)
+    await runMany(db, `INSERT INTO prizes (
+      id,pool_id,name,specification,level,category,value_cents,stock,sent_count,low_stock_threshold,weight,image,status,created_at,updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, prizes)
 
     const batches = [
       ['JL2601','臻享 20 元档第三期','20 元档',2000,'P-A',120000,'active',activeStart,activeEnd],

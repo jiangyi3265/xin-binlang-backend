@@ -18,6 +18,9 @@ test.before(async () => {
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve))
   base = `http://127.0.0.1:${app.server.address().port}`
   admin = await queryOne(app.db, "SELECT * FROM admin_users WHERE username='admin'")
+  // This suite owns the showcase candidate fixtures; seeded examples still
+  // retain their draw eligibility but do not enter the showcase sample.
+  await execute(app.db, "UPDATE prizes SET showcase_weight=0 WHERE pool_id IN ('P-A','P-B','P-C')")
   customer = await queryOne(app.db, "SELECT * FROM customers WHERE id='C001'")
   other = await queryOne(app.db, "SELECT * FROM customers WHERE id='C002'")
   owner = await queryOne(app.db, "SELECT * FROM store_accounts WHERE username='yht_owner'")
@@ -25,6 +28,8 @@ test.before(async () => {
   await execute(app.db, 'UPDATE customers SET openid=? WHERE id=?', 'oGuanlangLocalFixtureOnly', customer.id)
   pool = await app.service.savePool(admin, null, { name: '翻牌测试', tier: '50 元', status: 'active' })
   exchange = await app.service.savePrize(admin, null, { poolId: pool.id, name: '倌榔深蓝装', type: 'exchange', valueCents: 5000, exchangeCents: 300, stock: 20, weight: 1, img: '/assets/guanlang-product-50.jpg' })
+  assert.equal(exchange.displayOnly, false)
+  assert.equal(exchange.showcaseWeight, 1)
   cash = await app.service.savePrize(admin, null, { poolId: pool.id, name: '现金红包', type: 'cash', valueCents: 200, stock: 20, weight: 1, status: 'disabled' })
   batch = await app.service.saveBatch(admin, null, { id: 'FLIP_TEST', name: '翻牌测试批次', productTier: '50 元', priceCents: 5000, poolId: pool.id, winRatePpm: 1000000, startsAt: Date.now()-10000, expiresAt: Date.now()+86400000 })
 })
@@ -93,6 +98,83 @@ test('flip choice is required; concurrent retries retain one chosen card, one re
   await assert.rejects(app.service.verify(owner, code, '', '', false), error => error.code === 'ERR_EXCHANGE_PAYMENT')
   assert.equal((await app.service.verify(owner, code, '', '', true)).record.status, 'verified')
   await assert.rejects(app.service.verify(owner, code, '', '', true), error => error.code === 'ERR_DUP')
+})
+
+test('card previews include configured public prizes without changing the code pool or exposing private prizes', async () => {
+  const publicPool = await app.service.savePool(admin, null, { name: '展示奖池', tier: '30 元', status: 'active' })
+  const privatePool = await app.service.savePool(admin, null, { name: '不公开奖池', tier: '专属', status: 'active', presentation: { visible: false } })
+  const pausedPool = await app.service.savePool(admin, null, { name: '停用奖池', tier: '停用', status: 'disabled' })
+  const createPrize = (poolId, name, status = 'active') => app.service.savePrize(admin, null, { poolId, name, status, type: 'goods', valueCents: 3000, stock: 50, weight: 1, img: '/assets/guanlang-product-30.png' })
+  const visible = await createPrize(publicPool.id, '其他已配置奖品')
+  const disabled = await createPrize(publicPool.id, '已停用奖品', 'disabled')
+  const privatePrize = await createPrize(privatePool.id, '其他私有奖品')
+  const pausedPrize = await createPrize(pausedPool.id, '停用奖池奖品')
+  const code = await codeFor(exchange)
+  await app.service.savePool(admin, pool.id, { presentation: { visible: false } })
+  try {
+    const { data: preview } = await api('/api/customer/draw/preview', { code })
+    assert.deepEqual(preview.prizes.map(prize => prize.id), [exchange.id])
+    assert.ok(preview.displayPrizes.some(prize => prize.id === exchange.id))
+    assert.ok(preview.displayPrizes.some(prize => prize.id === visible.id))
+    for (const prize of [cash, disabled, privatePrize, pausedPrize]) {
+      assert.ok(!preview.displayPrizes.some(item => item.id === prize.id))
+    }
+    assert.equal(new Set(preview.displayPrizes.map(prize => prize.id)).size, preview.displayPrizes.length)
+    assert.ok(preview.displayPrizes.length <= 5)
+    assert.ok(preview.displayPrizes.every(prize => !('stock' in prize) && !('weight' in prize) && !('sent' in prize) && !('showcaseWeight' in prize)))
+    assert.equal((await queryOne(app.db, 'SELECT status FROM redeem_codes WHERE code=?', code)).status, 'unused')
+    const stock = (await queryOne(app.db, 'SELECT stock FROM prizes WHERE id=?', exchange.id)).stock
+    await app.service.savePrize(admin, exchange.id, { stock: 0 })
+    try {
+      assert.equal((await app.service.previewDraw(customer.id, code)).guaranteed, false)
+    } finally {
+      await app.service.savePrize(admin, exchange.id, { stock })
+    }
+    const drawn = await app.service.redeem(customer.id, code, '', '', 3)
+    assert.equal(drawn.record.poolId, pool.id)
+    assert.equal(drawn.record.prizeId, exchange.id)
+    assert.equal((await queryOne(app.db, 'SELECT stock FROM prizes WHERE id=?', visible.id)).stock, 50)
+  } finally {
+    await app.service.savePool(admin, pool.id, { presentation: { visible: true } })
+    await app.service.savePool(admin, publicPool.id, { status: 'disabled' })
+  }
+})
+
+test('display-only prizes appear only in card showcases and can never consume stock or award a real prize', async () => {
+  const displayPool = await app.service.savePool(admin, null, { name: '展示独立测试', tier: '专属', status: 'active', presentation: { visible: false } })
+  const displayPrize = await app.service.savePrize(admin, null, { poolId: displayPool.id, name: '展示手机', type: 'goods', valueCents: 999900, stock: 50, weight: 99999, displayOnly: true, showcaseWeight: 2.5 })
+  const displayCash = await app.service.savePrize(admin, null, { poolId: displayPool.id, name: '展示红包', type: 'cash', valueCents: 888800, stock: 50, displayOnly: true, showcaseWeight: 0 })
+  const realPrize = await app.service.savePrize(admin, null, { poolId: displayPool.id, name: '实际奖品', type: 'goods', valueCents: 100, stock: 0, weight: 1, showcaseWeight: 0 })
+  const localBatch = await app.service.saveBatch(admin, null, { id: 'SHOWCASE_TEST', name: '展示规则测试', productTier: '50 元', priceCents: 5000, poolId: displayPool.id, winRatePpm: 1000000, startsAt: Date.now() - 1000, expiresAt: Date.now() + 86400000 })
+  const code = String(++serial)
+  await execute(app.db, 'INSERT INTO redeem_codes (code,batch_id,created_at) VALUES (?,?,?)', code, localBatch.id, Date.now())
+  try {
+    const preview = await app.service.previewDraw(customer.id, code)
+    assert.equal(preview.guaranteed, false, 'display-only stock must not make the pool look guaranteed')
+    assert.ok(preview.prizes.every(prize => prize.id !== displayPrize.id && prize.id !== displayCash.id))
+    assert.ok(preview.displayPrizes.some(prize => prize.id === displayPrize.id))
+    assert.ok(preview.displayPrizes.every(prize => prize.id !== displayCash.id && prize.id !== realPrize.id))
+    await app.service.savePool(admin, displayPool.id, { presentation: { visible: true } })
+    assert.ok(!(await app.service.publicPrizes()).some(prize => prize.id === displayPrize.id || prize.id === displayCash.id))
+    const partial = await app.service.savePrize(admin, displayPrize.id, { name: '修改展示手机' })
+    assert.equal(partial.displayOnly, true)
+    assert.equal(partial.showcaseWeight, 2.5)
+    await assert.rejects(app.service.savePrize(admin, displayPrize.id, { showcaseWeight: -1 }), error => error.code === 'ERR_NUMBER')
+    await assert.rejects(app.service.savePrize(admin, displayPrize.id, { displayOnly: 'false' }), error => error.code === 'ERR_DISPLAY_ONLY')
+
+    await app.service.savePrize(admin, realPrize.id, { stock: 2 })
+    const drawn = await app.service.redeem(customer.id, code, '', '', 2)
+    assert.equal(drawn.record.prizeId, realPrize.id, 'a large showcase/draw weight cannot enable a display-only prize')
+    assert.equal((await queryOne(app.db, 'SELECT stock FROM prizes WHERE id=?', displayPrize.id)).stock, 50)
+    assert.equal((await queryOne(app.db, 'SELECT stock FROM prizes WHERE id=?', displayCash.id)).stock, 50)
+
+    const forced = String(++serial)
+    await execute(app.db, 'INSERT INTO redeem_codes (code,batch_id,forced_outcome,forced_prize_id,created_at) VALUES (?,?,?,?,?)', forced, localBatch.id, 'win', displayPrize.id, Date.now())
+    await assert.rejects(app.service.redeem(customer.id, forced, '', '', 4), error => error.code === 'ERR_PRIZE_DISPLAY_ONLY')
+    assert.equal((await queryOne(app.db, 'SELECT status FROM redeem_codes WHERE code=?', forced)).status, 'unused')
+  } finally {
+    await app.service.savePool(admin, displayPool.id, { status: 'disabled' })
+  }
 })
 
 test('thanks result creates no fabricated compensation coupon; repeat draw cannot reroll', async () => {

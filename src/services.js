@@ -1,4 +1,5 @@
 import { validatePresentation, resolvePresentation } from './pool-presentation.js';
+import { sampleShowcasePrizes } from './showcase-prizes.js';
 import { CashRewards } from './cash-rewards.js';
 import { randomInt } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -66,7 +67,7 @@ export class PlatformService {
   // 未登录也要能看到本期奖品，所以走 prizeView 的公开视图：
   // 只给名称/档位/价值/图片，库存、权重、中奖概率一律不出小程序。
   async publicPrizes() {
-    const rows = await queryAll(this.db, "SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id LEFT JOIN pool_presentations pd ON pd.pool_id=pp.id WHERE p.status='active' AND pp.status='active' AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(pd.display_json,'$.visible')),'true')<>'false' ORDER BY p.value_cents DESC");
+    const rows = await queryAll(this.db, "SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id LEFT JOIN pool_presentations pd ON pd.pool_id=pp.id WHERE p.status='active' AND p.display_only=0 AND pp.status='active' AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(pd.display_json,'$.visible')),'true')<>'false' ORDER BY p.value_cents DESC");
     return rows.map(row => prizeView(row, true));
   }
   async audit({
@@ -317,7 +318,7 @@ export class PlatformService {
     const now = Date.now();
     assert(row.status === 'active' && row.pool_status === 'active', 409, 'ERR_BATCH_PAUSED', '该卡密所属活动已暂停');
     assert(row.starts_at <= now && row.expires_at > now, 409, 'ERR_BATCH_EXPIRED', '该卡密所属批次不在有效期内');
-    const prizes = await this.prizes({ poolId: row.pool_id, status: 'active' });
+    const prizes = (await this.prizes({ poolId: row.pool_id, status: 'active' })).filter(prize => !prize.displayOnly);
     const demand = await queryOne(this.db, `SELECT COUNT(*) AS total,SUM(rc.forced_outcome='lose') AS losses
       FROM redeem_codes rc JOIN batches b ON b.id=rc.batch_id
       WHERE b.pool_id=? AND b.status='active' AND b.expires_at>? AND rc.status='unused'`, row.pool_id, now);
@@ -328,11 +329,25 @@ export class PlatformService {
         AND rc.forced_prize_id IS NOT NULL GROUP BY rc.forced_prize_id`, row.pool_id, now);
     const unassigned = Number(demand.total) - assigned.reduce((sum, item) => sum + Number(item.total), 0);
     const assignedCovered = assigned.every(item => Number(prizes.find(prize => prize.id === item.prize_id)?.stock || 0) >= Number(item.total) + unassigned);
+    // Only this code's pool can award a prize. Display-only rewards and other
+    // public pools are independent candidates for the non-selected cards.
+    const displayRows = await queryAll(this.db, `SELECT p.*,rr.exchange_cents,pp.name AS pool_name
+      FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id
+      LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id
+      LEFT JOIN pool_presentations pd ON pd.pool_id=pp.id
+      WHERE p.status='active' AND p.showcase_weight>0 AND pp.status='active'
+        AND (p.pool_id=? OR COALESCE(JSON_UNQUOTE(JSON_EXTRACT(pd.display_json,'$.visible')),'true')<>'false')
+      ORDER BY p.id`, row.pool_id);
+    // There are only five non-selected cards. Sampling five candidates keeps
+    // a sixth, low-weight showcase prize genuinely optional instead of
+    // forcing every positive-weight candidate into every preview.
+    const displayPrizes = sampleShowcasePrizes(displayRows.map(prize => prizeView(prize)), 5);
+    const previewPrize = ({ id, name, type, valueCents, value, exchangeCents, exchangeAmount, img, spec }) =>
+      ({ id, name, type, valueCents, value, exchangeCents, exchangeAmount, img, spec });
     return { poolId: row.pool_id, batchId: row.id, productTier: row.product_tier, priceCents: row.price_cents,
       presentation: resolvePresentation(parseJson(row.display_json, {}), row.price_cents),
       guaranteed: row.win_rate_ppm === 1000000 && !Number(demand.losses) && stock > 0 && stock >= Number(demand.total) && assignedCovered,
-      prizes: prizes.map(({ id, name, type, valueCents, value, exchangeCents, exchangeAmount, img, spec }) =>
-        ({ id, name, type, valueCents, value, exchangeCents, exchangeAmount, img, spec })) };
+      prizes: prizes.map(previewPrize), displayPrizes: displayPrizes.map(previewPrize) };
   }
   async updatePreferredStore(customerId, id, storeId) {
     const row = await queryOne(this.db, 'SELECT * FROM redemptions WHERE customer_id=? AND id=?', customerId, id);
@@ -382,7 +397,7 @@ export class PlatformService {
       assert(codeRow.status === 'unused', 409, 'ERR_USED', '该兑换码已被使用，同一卡密仅可兑奖一次');
       assert(codeRow.batch_status === 'active', 409, codeRow.batch_status === 'expired' ? 'ERR_BATCH_EXPIRED' : 'ERR_BATCH_PAUSED', codeRow.batch_status === 'expired' ? '该卡密所属批次已到期' : '该卡密所属批次已暂停');
       assert(codeRow.starts_at <= now && codeRow.expires_at > now, 409, 'ERR_BATCH_EXPIRED', '该卡密所属批次不在有效期内');
-      const cashPrize = await queryOne(this.db, "SELECT MAX(value_cents) AS amount FROM prizes WHERE pool_id=? AND category='cash' AND status='active' AND stock>0", codeRow.pool_id);
+      const cashPrize = await queryOne(this.db, "SELECT MAX(value_cents) AS amount FROM prizes WHERE pool_id=? AND category='cash' AND status='active' AND display_only=0 AND stock>0", codeRow.pool_id);
       if (cashPrize?.amount != null) {
         assert(this.cash.ready(), 409, 'ERR_CASH_NOT_CONFIGURED', '本奖池现金领取尚未开放，请稍后再来，兑换码未消耗');
         assert(Number(cashPrize.amount) <= this.config.transfer.maxCents, 409, 'ERR_CASH_AMOUNT', '现金奖品配置需要调整，兑换码未消耗');
@@ -395,12 +410,13 @@ export class PlatformService {
       if (shouldWin) {
         if (codeRow.forced_prize_id) {
           prize = await queryOne(this.db, 'SELECT * FROM prizes WHERE id=? AND pool_id=?', codeRow.forced_prize_id, codeRow.pool_id);
+          assert(!prize?.display_only, 409, 'ERR_PRIZE_DISPLAY_ONLY', '该兑换码的奖项暂不可开奖，请联系客服，兑换码未消耗');
           if (!prize || prize.status !== 'active' || prize.stock <= 0) {
             stockOut = true;
             prize = null;
           }
         } else {
-          prize = chooseWeightedPrize(await queryAll(this.db, "SELECT * FROM prizes WHERE pool_id=? AND status='active' AND stock>0 ORDER BY value_cents DESC", codeRow.pool_id));
+          prize = chooseWeightedPrize(await queryAll(this.db, "SELECT * FROM prizes WHERE pool_id=? AND status='active' AND display_only=0 AND stock>0 ORDER BY value_cents DESC", codeRow.pool_id));
         }
       }
       if (prize?.category === 'cash') {
@@ -410,7 +426,7 @@ export class PlatformService {
         assert(store, 409, 'ERR_NO_STORE', '暂无可核销门店，兑换码未消耗');
       }
       if (prize) {
-        const changed = await execute(this.db, "UPDATE prizes SET stock=stock-1, updated_at=? WHERE id=? AND status='active' AND stock>0", now, prize.id);
+        const changed = await execute(this.db, "UPDATE prizes SET stock=stock-1, updated_at=? WHERE id=? AND status='active' AND display_only=0 AND stock>0", now, prize.id);
         if (Number(changed.changes) !== 1) {
           stockOut = true;
           prize = null;
@@ -762,7 +778,7 @@ export class PlatformService {
     return paged(rows.map(row => this.auditView(row)), total, page, pageSize);
   }
   async storePrizeLibrary() {
-    return (await queryAll(this.db, 'SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id ORDER BY p.value_cents DESC')).map(row => prizeView(row));
+    return (await queryAll(this.db, "SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.display_only=0 ORDER BY p.value_cents DESC")).map(row => prizeView(row));
   }
   async storeStaff(account) {
     assert(account.role === 'owner' || account.role === 'hq', 403, 'ERR_PERMISSION', '无员工管理权限');
@@ -925,7 +941,7 @@ export class PlatformService {
       SUM(CASE WHEN status='frozen' THEN 1 ELSE 0 END) AS frozen
       FROM redemptions`);
     const codeStats = await queryAll(this.db, 'SELECT status, COUNT(*) AS count FROM redeem_codes GROUP BY status');
-    const lowStock = (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.status='active' AND p.stock<=p.low_stock_threshold ORDER BY p.stock`)).map(row => prizeView(row));
+    const lowStock = (await queryAll(this.db, `SELECT p.*, rr.exchange_cents, pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.status='active' AND p.display_only=0 AND p.stock<=p.low_stock_threshold ORDER BY p.stock`)).map(row => prizeView(row));
     const stores = (await queryAll(this.db, `SELECT s.id, s.short_name, COUNT(r.id) AS verified FROM stores s LEFT JOIN redemptions r ON r.verified_store_id=s.id AND r.status='verified' GROUP BY s.id ORDER BY verified DESC`)).map(row => ({
       id: row.id,
       name: row.short_name,
@@ -1144,13 +1160,22 @@ export class PlatformService {
     assert(PRIZE_STATUSES.has(status), 400, 'ERR_STATUS', '奖品状态不正确');
     const category = body.type == null ? current?.category || 'goods' : text(body.type, 30);
     assert(new Set(['goods', 'exchange', 'cash', 'coupon']).has(category), 400, 'ERR_PRIZE_TYPE', '奖品类型不正确');
+    assert(body.displayOnly == null || typeof body.displayOnly === 'boolean', 400, 'ERR_DISPLAY_ONLY', '仅展示奖品开关格式不正确');
+    const displayOnly = body.displayOnly == null ? Number(current?.display_only || 0) : boolInt(body.displayOnly);
+    const showcaseWeight = body.showcaseWeight == null ? Number(current?.showcase_weight ?? 1) : Number(numberValue(body.showcaseWeight, '展示权重', 0, 100000).toFixed(4));
+    if (displayOnly && !Number(current?.display_only || 0)) {
+      const forced = await queryOne(this.db, "SELECT code FROM redeem_codes WHERE forced_prize_id=? AND status='unused' LIMIT 1", finalId);
+      assert(!forced, 409, 'ERR_PRIZE_FORCED_CODES', '该奖品已有未使用的指定兑换码，暂不能改为仅展示');
+    }
     const oldRule = current ? await queryOne(this.db, 'SELECT exchange_cents FROM prize_reward_rules WHERE prize_id=?', id) : null;
     const exchangeCents = category === 'exchange' ? integer(body.exchangeCents ?? oldRule?.exchange_cents ?? 0, '换购补款金额', 1, 10000000) : 0;
     const valueCents = body.valueCents ?? current?.value_cents ?? 0;
     assert(category !== 'exchange' || exchangeCents < valueCents, 400, 'ERR_EXCHANGE_AMOUNT', '换购补款金额必须小于整袋商品价值');
-    assert(category !== 'cash' || (valueCents > 0 && valueCents <= this.config.transfer.maxCents), 400, 'ERR_CASH_AMOUNT', '红包金额必须在已配置的单笔范围内');
-    const row = [poolId, body.name == null ? current?.name : requiredText(body.name, '奖品名称', 100), body.spec == null ? current?.specification || '' : text(body.spec, 100), body.level == null ? current?.level || '' : text(body.level, 50), body.type == null ? current?.category || 'goods' : text(body.type, 30), body.valueCents == null ? current?.value_cents : integer(body.valueCents, '奖品价值', 0, 100000000), body.stock == null ? current?.stock : integer(body.stock, '库存', 0, 100000000), body.sent == null ? current?.sent_count || 0 : integer(body.sent, '已发数量', 0, 100000000), body.lowStockThreshold == null ? current?.low_stock_threshold || 10 : integer(body.lowStockThreshold, '预警阈值', 0, 100000000), body.weight == null ? current?.weight || 1 : numberValue(body.weight, '抽奖权重', 0.0001, 100000), body.img == null ? current?.image || '' : text(body.img, 500), status];
-    if (current) await execute(this.db, 'UPDATE prizes SET pool_id=?,name=?,specification=?,level=?,category=?,value_cents=?,stock=?,sent_count=?,low_stock_threshold=?,weight=?,image=?,status=?,updated_at=? WHERE id=?', ...row, now, id);else await execute(this.db, 'INSERT INTO prizes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', finalId, ...row, now, now);
+    assert(category !== 'cash' || displayOnly || (valueCents > 0 && valueCents <= this.config.transfer.maxCents), 400, 'ERR_CASH_AMOUNT', '红包金额必须在已配置的单笔范围内');
+    const row = [poolId, body.name == null ? current?.name : requiredText(body.name, '奖品名称', 100), body.spec == null ? current?.specification || '' : text(body.spec, 100), body.level == null ? current?.level || '' : text(body.level, 50), body.type == null ? current?.category || 'goods' : text(body.type, 30), body.valueCents == null ? current?.value_cents : integer(body.valueCents, '奖品价值', 0, 100000000), body.stock == null ? current?.stock ?? 0 : integer(body.stock, '库存', 0, 100000000), body.sent == null ? current?.sent_count || 0 : integer(body.sent, '已发数量', 0, 100000000), body.lowStockThreshold == null ? current?.low_stock_threshold || 10 : integer(body.lowStockThreshold, '预警阈值', 0, 100000000), body.weight == null ? current?.weight || 1 : numberValue(body.weight, '抽奖权重', 0.0001, 100000), displayOnly, showcaseWeight, body.img == null ? current?.image || '' : text(body.img, 500), status];
+    if (current) await execute(this.db, 'UPDATE prizes SET pool_id=?,name=?,specification=?,level=?,category=?,value_cents=?,stock=?,sent_count=?,low_stock_threshold=?,weight=?,display_only=?,showcase_weight=?,image=?,status=?,updated_at=? WHERE id=?', ...row, now, id);else await execute(this.db, `INSERT INTO prizes (
+      id,pool_id,name,specification,level,category,value_cents,stock,sent_count,low_stock_threshold,weight,display_only,showcase_weight,image,status,created_at,updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, finalId, ...row, now, now);
     await execute(this.db, 'INSERT INTO prize_reward_rules (prize_id,exchange_cents) VALUES (?,?) ON DUPLICATE KEY UPDATE exchange_cents=VALUES(exchange_cents)', finalId, exchangeCents);
     await this.audit({
       actorType: 'admin',
@@ -1160,7 +1185,8 @@ export class PlatformService {
       entityType: 'prize',
       entityId: finalId,
       ip,
-      result: '保存成功'
+      result: '保存成功',
+      detail: { displayOnly: Boolean(displayOnly), showcaseWeight }
     });
     return prizeView(await queryOne(this.db, 'SELECT p.*,rr.exchange_cents,pp.name AS pool_name FROM prizes p JOIN prize_pools pp ON pp.id=p.pool_id LEFT JOIN prize_reward_rules rr ON rr.prize_id=p.id WHERE p.id=?', finalId));
     });
